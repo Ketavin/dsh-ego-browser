@@ -10,6 +10,7 @@ import { CdpClient } from './cdp-client.ts'
 import { TargetSessions, CdpCaptureBackend } from './capture-cdp.ts'
 import { CaptureManager } from './capture-manager.ts'
 import { FfmpegCaptureBackend } from './capture-ffmpeg.ts'
+import { shouldProbePage, workerRequestRejection } from './request-fence.ts'
 
 const SENTINEL = '@@DSH_RESULT@@'
 const HOME = homedir() || process.env.HOME || process.env.USERPROFILE || '/root'
@@ -273,7 +274,7 @@ async function snapshotSpaces(): Promise<Array<Record<string, unknown>>> {
     const frame = frameCache.get(target.targetId)
     const session = active!.sessions.get(target.targetId)
     const cached = probeCache.get(target.targetId)
-    if (!cached || Date.now() - cached.at > 5000) {
+    if (shouldProbePage(process.env.DSH_EGO_SCOPED_WORKER === '1') && (!cached || Date.now() - cached.at > 5000)) {
       active!.sessions.call(target.targetId, 'Runtime.evaluate', { expression: HUMAN_PROBE_JS, returnByValue: true, awaitPromise: false }, 3000)
         .then((result) => { const r = result as { result?: { value?: unknown } }; probeCache.set(target.targetId, { at: Date.now(), human: r.result?.value || null }) }).catch(() => { /* ignore */ })
     }
@@ -360,10 +361,17 @@ function stopSiblingWorkers(): void {
 }
 
 async function main(): Promise<void> {
-  stopSiblingWorkers()
+  // Scoped hosts own a dedicated state directory and must never stop another
+  // profile's worker merely because its executable has the same filename.
+  if (process.env.DSH_EGO_SCOPED_WORKER !== '1') stopSiblingWorkers()
   rmSync(CAST_STATE_FILE, { force: true })
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const rejected = workerRequestRejection(req)
+    if (rejected !== undefined) return sendJson(res, rejected, { ok: false, code: 'worker-request-rejected' })
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1' && (url.pathname.startsWith('/api/video/') || url.pathname === '/api/flush')) {
+      return sendJson(res, 409, { ok: false, code: 'unscoped-capability-disabled' })
+    }
     try {
       if (req.method === 'GET' && url.pathname === '/api/health') return sendJson(res, 200, { workerOk: true, browserConnected: !!active, capture: manager.status() })
       if (req.method === 'GET' && url.pathname === '/api/spaces') return sendJson(res, 200, { ok: true, spaces: active ? await snapshotSpaces() : [], capture: manager.status() })

@@ -18,6 +18,11 @@
 | `runtime/ego-linux/bin/ego-browser.mjs` | headless 判定加 `hasDisplay`：有可用 X display（如 Xvfb）时忽略继承的 `EGO_LINUX_HEADLESS=1`，跑 headed | watch 面板全帧率 + ffmpeg x11grab 后端能抓到画面：headless 走 swiftshader ~1fps 且不渲染到 X display（x11grab 抓黑屏）。PR #10 曾回退此逻辑（只认 env），已重新移植（2026-08-18） |
 | `runtime/ego-linux/bin/ego-browser.mjs` | 显式 `EGO_LINUX_HEADLESS=1/true/yes/on` 现在优先于 `hasDisplay` 推断（含 win32）；未设置时维持原 hasDisplay 逻辑 | issue #35：此前 win32 硬编码 `hasDisplay=true` 导致显式设置的环境变量被静默忽略，与 CLI help / README 文档矛盾 |
 | `runtime/ego-linux/src/task-spaces.mjs` | `createSeededContext()` 增加 `EGO_ISOLATE_SPACES` 环境变量开关支持；未开启（默认）时返回 `null` 复用磁盘 Profile，开启时保留原作者内存沙盒隔离 | 登录态持久化与沙盒隔离双模可配：用户在设置中选择是否开启空间隔离；默认关闭时所有登录态直接落盘，跨关机重启永久保留，开启时恢复独立内存沙盒 |
+| `runtime/ego-linux/src/scoped-popups.mjs` | 本地 rc.2 候选新增 opener 后代归属校验：只接纳已拥有父 target、同 browser context 的 page；学习 Chrome 默认 opaque context；保留既有 owner，拒绝冲突/孤立 opener | scoped task 空间需要接纳本会话 popup，但不能按 URL 或全局 target 列表猜归属。只通过本地 OAuth 类 fixture，真实账号 OAuth 未验收 |
+| `runtime/ego-linux/src/task-spaces.mjs` | `DSH_EGO_SCOPED_WORKER=1` 下，在剔除已关闭 target 前协调 popup 归属并保存 targetIds | 父页面关闭后仍保留已证明归属的 popup，防空空间/global fallback |
+| `runtime/ego-linux/src/task-spaces.mjs` | scoped 模式禁用按 URL 重收养与全局 abandoned/idle sweep | URL 相同不能证明 Session 归属；A 的 CLI 不得绕过 Host lease 关闭 B 页签。生命周期由宿主管理 |
+| `runtime/ego-linux/src/tabs.mjs` | scoped 模式空 task 只返回空列表，不返回全局 tabs；未知 task scope 抛错 | 避免 A 的空/关闭 task 读取另一个 Session 的页面 |
+| `runtime/ego-linux/src/tabs.mjs` / `task-spaces.mjs` | scoped context 仍要求精确 proven targetIds；全局 reconcile 不 dispose 空 tracked context | 同 context 不能替代 opener/target 归属证明；A 的重协调不得关闭 B context 内尚存页面 |
 | `runtime/ego-browser/screenshot-clip.mjs` + `runtime/ego-browser/dist/out/index.js` `screenshot()` | viewport / locator 截图的 CDP clip 原点改为 `pageInfo().sx/sy`（`scrollX/scrollY`），不再固定 `{x:0,y:0}`；fullPage 仍从文档原点截整页 | CDP clip 是文档坐标且默认 `captureBeyondViewport:false`：滚动后 clip 落在未绘制区域会得到空白 PNG。与 `spaces-server.mjs` followClip 同一约定 |
 | （其余 runtime 文件）| 与 vendoring 时一致 | 无后续本地改动 |
 

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 import { agentIdentity } from "./agent-identity.mjs";
 import { STATE_DIR, TASK_SPACE_FILE } from "./paths.mjs";
+import { adoptScopedPopups } from "./scoped-popups.mjs";
 
 /**
  * Task spaces, emulated as tracked sets of tabs.
@@ -264,6 +265,7 @@ export function createTaskSpacesApi(cdp) {
   async function reconcile(state) {
     const live = await livePageTargets();
     let changed = false;
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1') changed = adoptScopedPopups(state.spaces, [...live.values()]);
 
     for (const space of state.spaces) {
       const kept = (space.targetIds || []).filter((id) => live.has(id));
@@ -289,9 +291,14 @@ export function createTaskSpacesApi(cdp) {
       }
     }
 
-    if (readoptRestoredPages(state, live)) changed = true;
-    if (await pruneAbandoned(state, live)) changed = true;
-    if (await pruneIdle(state)) changed = true;
+    // URL equality is not ownership proof; global sweeps can also close another
+    // Session's targets outside its host lease. Scoped lifecycle belongs to the
+    // DSH host, so none of the legacy restart/sweep heuristics run in this mode.
+    if (process.env.DSH_EGO_SCOPED_WORKER !== '1') {
+      if (readoptRestoredPages(state, live)) changed = true;
+      if (await pruneAbandoned(state, live)) changed = true;
+      if (await pruneIdle(state)) changed = true;
+    }
 
     const surviving = state.spaces.filter((space) => space.targetIds.length > 0);
     if (surviving.length !== state.spaces.length) {
@@ -300,7 +307,7 @@ export function createTaskSpacesApi(cdp) {
       // one. Dropping the record alone would strand a live context holding a
       // full copy of the seeded cookie jar until the browser restarts.
       for (const space of state.spaces) {
-        if (space.targetIds.length === 0 && space.browserContextId) {
+        if (space.targetIds.length === 0 && space.browserContextId && process.env.DSH_EGO_SCOPED_WORKER !== '1') {
           await disposeContext(space.browserContextId);
         }
       }

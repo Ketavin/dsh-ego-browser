@@ -1,46 +1,117 @@
-# DSH rc.2 adaptation candidate
+# Reviewed DSH rc.2 isolation candidate
 
-This is an isolated source candidate based on upstream v0.8.6,
-`dfde57221443bdade5e0cbee7c773a6839ffe560`. It is not enabled in the formal
-Profile and is not yet a compatible release. Do not lower the package engine
-range or enable the plugin before the remaining integration gates pass.
+Local version: `0.8.6-dsh-rc2.1`. Upstream v0.8.6 source base:
+`dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
+source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
+is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
+with the isolated P1/P2 changes. Exact candidate commits and package hashes are
+recorded outside this repository in the P3 verification receipt.
 
-The first change reuses `connection.requestRejection` on every cast route and
-the settings prefix. On the deployed Core (`8de453b`, with the P1/P2 candidate
-layered on it), this means loopback socket plus Host/Origin/browser trust.
-It is **not** an authenticated user identity interface. Remote callers are
-denied; forged `dsh-auth-*` cookies have no effect. Missing/unmounted Host
-fences fail closed. Actions also require POST and JSON; reads require GET.
-The client still needs its bodyless POST calls reviewed against this contract.
+The client requires the Better Sidebar `browserUrl` feature. The frozen P3
+Sidebar is `28f386159610f093ede57da81fa7f158cd674aa2`, based on the actual formal
+0.17.8 source. It exposes one Browser entry with Preview and Agent modes while
+preserving both tab lifecycles. Ego registers only `ego-browser:watch`; there is
+no floating ball or second Browser rail icon. The old upstream README, ARCH.md
+and legacy JavaScript describe a different runtime. Current TypeScript and
+this adaptation note are authoritative for the local candidate.
 
-The entry schema uses plain fields because rc.2 has no `.volatile()` API.
-Its existing registered settings scope/watch path is retained. This fixes a
-real load-time exception found while exercising the source with Core's actual
-Schemastery. It does not certify every settings UI path.
+## Runtime and request boundary
 
-Development links for tools/settings point to the sibling isolated P2 Core
-checkout. Automatic peer installation is disabled in pnpm-workspace.yaml to
-prevent `pnpm exec` from silently adding a different DSH generation. The
-lockfile pins this development assembly; final release dependency metadata
-will be established after the rc.2 client and runtime gates.
+`DSH_EGO_ISOLATED_RUNTIME=1` and an existing absolute `DSH_HOME` are mandatory.
+Without both, actions fail closed as `isolated-runtime-unconfigured`. Data,
+state, cache, worker and Chrome profile paths stay under
+`DSH_HOME/plugins/ego-browser/runtime`; existing links are resolved and checked
+against that home. Inherited external CDP and extra Chrome arguments are
+cleared. No daily Chrome, ResearchHub runtime or existing account is imported.
+Only CDP JPEG capture is enabled in this candidate.
 
-Validated on 2026-10-03:
+Every public cast route and gateway settings prefix uses the actual Core
+`connection.requestRejection`. This checks local socket, Host, Origin and
+browser request trust. It is **not authenticated user identity**. A forged
+cookie supplies no authority. Required fences missing or unmounted, remote
+callers, wrong method and non-JSON mutation requests are denied. The private
+worker also rejects browser-origin/fetch-site requests before input dispatch;
+scoped mode disables its global video and auth-flush surfaces.
 
-- Host/client TypeScript check passed.
-- Config/settings/trust/cast regression: 6 files, 41 tests passed.
-- Separate fixture using the actual Core HostConnectionService and real
-  loopback HTTP: 64 checks passed across all 15 registered routes, remote
-  socket rejection, and Host-approved requests without cookies. No browser,
-  worker, ffmpeg download or external provider was started.
+Session/Agent ownership is a separate boundary: actual live Session registry,
+new host generation, per-session task name, proven CLI ownership record and
+owned target set. Reads, frame streams, navigation and input require matching
+session/generation/target. Arbitrary global spaces and raw target IDs are
+rejected. Disposal tombstones the scope and closes its streams. An empty task
+never falls back to global browser tabs.
 
-Still required: rc.2 client runtime bridge; per-session task-space ownership
-and popup/target checks; shared human/tool control lease and cancellation;
-explicit main-chat context/continue bridge; independent Chrome data path;
-Windows runtime, OAuth and persistence validation; real combined Sidebar
-Profile and actual loaded-bundle checks. The existing global default space,
-unrestricted low-level script tools and login-import controls must not be
-mistaken for an accepted scoped integration.
+Popups are adopted only from a browser-reported opener chain rooted in a
+previously owned target, within its proven browser context. Existing owners
+are never reassigned; ambiguous and unowned openers are rejected. Chrome's
+default context can have an opaque ID, which is learned from owned live
+targets. Reconciliation occurs during scoped CLI access and human membership
+polling under the same control lease. Task ownership does not imply account
+cookie isolation: default-context spaces share the dedicated Agent cookie jar.
+URL restart recovery, global abandoned/idle sweeps and empty-context disposal
+are disabled in scoped reconciliation; another Session's CLI cannot use those
+heuristics to adopt or close a target. A late popup without a previously proven
+parent/context is rejected and may pause the lease, rather than guessed by URL.
 
-P1–P6 are to ship together only after individual and combined acceptance,
-under a new exact production release approval. This source commit grants no
-production promotion or account-login permission.
+## Control and public main-conversation bridge
+
+Exactly 25 tools are registered, listed by `SCOPED_EGO_TOOL_NAMES` and
+`ego_help`. Low-level `ego_cli`, `ego_script`, `ego_js`, `ego_cdp`,
+`ego_login_import`, `ego_auth_flush`, global `ego_status` and
+`ego_space_close` are not registered. Server-mode HTTP and download trigger
+scripts are refused. Native window raise and system login import are disabled.
+
+One host lease serializes agent work and explicit human takeover. Input carries
+an ordered sequence and exact lease epoch; possible held keys/buttons must be
+released before control/continuation handoff. Unconfirmed cancellation or input
+completion pauses fail closed instead of granting another actor permission.
+Hidden/unmounted clients flush input, release the exact lease, and release any
+late grant. Old generations, stale streams and callbacks cannot restore access.
+
+The client uses the actual rc.2 public `sessions.binding`, `SessionFace.prompt`
+and `SessionFace.cancel`, without reopening the active global runtime. Page
+context is bounded, treated as untrusted external text, redacts obvious secret
+fields and omits URL credentials/query/fragment. Reading and continuing require
+explicit submission; a prompt receipt does not mean the Agent has read it or
+resumed the same turn.
+
+Continue is two-phase: the host claims actual public `Agent.runMaintenance`,
+returns a marker receipt, then commits only after a new durable user inbox
+message on the same live Agent contains that marker. Abort, TTL, cancellation,
+disposal, stale generation/epoch or missing marker leave the browser paused.
+Ambiguous prompt/commit responses retain an idempotent intent; admission cannot
+be described as withdrawn merely because a client closes afterward.
+
+## Evidence and remaining acceptance
+
+The final verification receipt records full unit/typecheck/build counts and
+the exact built entry and package hashes. Isolated evidence includes:
+
+- Real Core HostConnectionService over loopback HTTP: 64 trust checks.
+- Actual compiled rc.2 Session/Agent/Loop and public maintenance: four checks.
+- Actual Host ApiProxy JSON carrier and source client SessionFace: five checks
+  for creation, public prompt marker admission, commit, cancel and precise
+  single-session disposal while another Session remains live.
+- Actual Windows dedicated headless Chrome, built host and worker: eight checks
+  for A/B space ownership, real CDP frames, private worker browser-origin
+  rejection, human input/lease release, local opener/302 callback/owned popup
+  close and verified owned process cleanup.
+- Real React source lifecycle fixtures exercise A/B remount, late takeover
+  release, held-input drain and host-generation replacement.
+
+The browser probe uses a native subprocess adapter seam rather than the formal
+Core subprocess service. The RPC probe uses the actual in-process JSON carrier,
+not the complete SessionRuntime projection or web socket transport. No external
+LLM, actual login or production service is touched.
+
+Still required before joint release: loaded final bundles in the combined
+Sidebar/Profile, real formal subprocess integration, P1–P6 joint regression,
+restart/persistence and stale PID/state reuse. Actual provider OAuth and account
+login are not accepted: only a local OAuth-style popup/opener/redirect fixture
+has passed. Platform variants, shared daily-browser runtime, FFmpeg and native
+window handoff are not certified capabilities of this candidate.
+
+Development links for settings/tools point to the isolated P2 Core. Automatic
+peer installation is disabled; the frozen lockfile is required. The package
+pins the reviewed rc.2 peers and does not authorize an overall Core upgrade.
+P1–P6 ship together only after individual and combined acceptance. This source
+candidate does not itself authorize production promotion or account login.

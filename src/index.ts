@@ -39,7 +39,7 @@ import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { importLoginCookies } from './login-import.ts'
-import { initCastServer, markEgoToolCall, getLastEgoActivity } from './cast-server.ts'
+import { initCastServer, markEgoToolCall, getLastEgoActivity, revokeEgoSignals, resetEgoToolCounts } from './cast-server.ts'
 import { EGO_HELP_INDEX } from './help.ts'
 import { HUMAN_CHECK_PROBE } from './captcha.ts'
 import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
@@ -47,7 +47,13 @@ import { installEgoBrowserSettings } from './settings.ts'
 import { registerEgoBrowserGateway } from './gateway.ts'
 import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
-import type { EgoContext, RawConfig, ResolvedConfig, SubprocessService, ToolExec, WebServerLike } from './types.ts'
+import { SessionSpaceRegistry, ScopeError } from './session-spaces.ts'
+import { ControlLease } from './control-lease.ts'
+import { ContinuationGate } from './continuation-gate.ts'
+const DISABLED_EGO_TOOLS = new Set(['ego_cli', 'ego_script', 'ego_js', 'ego_cdp', 'ego_login_import', 'ego_auth_flush', 'ego_status', 'ego_space_close'])
+export const SCOPED_EGO_TOOL_NAMES = ['ego_space_open', 'ego_snapshot', 'ego_navigate', 'ego_click', 'ego_fill', 'ego_screenshot', 'ego_page_info', 'ego_wait', 'ego_wait_for_selector', 'ego_wait_for_url', 'ego_wait_for_response', 'ego_key', 'ego_hover', 'ego_read_element', 'ego_select', 'ego_drag', 'ego_scroll', 'ego_upload', 'ego_download', 'ego_check', 'ego_dialog', 'ego_http', 'ego_captcha', 'ego_help', 'ego_doctor'] as const
+import { isolatedRuntimeEnv } from './runtime-isolation.ts'
+import type { EgoContext, RawConfig, ResolvedConfig, ScopedBrowserHost, SubprocessService, ToolExec, WebServerLike } from './types.ts'
 
 export const name = 'ego-browser'
 // Platform-aware host services: the web shell exposes `webServer`, other Web
@@ -303,7 +309,8 @@ function isHeadlessDetected(platform: NodeJS.Platform = process.platform, env: N
  *
  * Platform/env are injectable for testing; production calls use process defaults.
  */
-export function resolveEgoEnv(cfg: Partial<ResolvedConfig>, { platform = process.platform, baseEnv = process.env }: { platform?: NodeJS.Platform; baseEnv?: NodeJS.ProcessEnv } = {}): NodeJS.ProcessEnv {
+export function resolveEgoEnv(cfg: Partial<ResolvedConfig> & { runtimeEnv?: NodeJS.ProcessEnv }, { platform = process.platform, baseEnv = process.env }: { platform?: NodeJS.Platform; baseEnv?: NodeJS.ProcessEnv } = {}): NodeJS.ProcessEnv {
+  if (cfg.runtimeEnv) baseEnv = cfg.runtimeEnv
   if (AUTO_ADAPT_OFF) {
     // New switch explicitly disabled: original behavior, inherit verbatim.
     return baseEnv
@@ -481,6 +488,9 @@ export async function runWithStaleSpaceRetry(  ctx: EgoContext,
   buildScript: () => string,
   graceOverrideMs?: number,
 ): Promise<WarmupResult> {
+  // A failed CDP/CLI receipt cannot prove a mutating action was not applied.
+  // Scoped execution never retries that intent implicitly.
+  if (cfg.scopes) return runEgoScript(ctx.subprocess, buildScript(), exec, cfg, graceOverrideMs)
   let result = await withWarmupRetry(() => runEgoScript(ctx.subprocess, buildScript(), exec, cfg, graceOverrideMs))
   if (!result.ok && /task space not found: \d+/.test(result.error ?? '')) {
     cfg.spaceTracker.resetToName()
@@ -506,6 +516,8 @@ function parseSentinel(stdout: string): Record<string, unknown> | undefined {
 
 /** The live runtime config object built in apply() (getters read the settings bridge). */
 interface EgoRuntimeConfig {
+  scopes?: SessionSpaceRegistry
+  runtimeEnv?: NodeJS.ProcessEnv
   egoBin: string
   configuredDefaultSpace: string | number
   spaceTracker: ActiveSpaceTracker
@@ -534,16 +546,24 @@ interface EgoRuntimeConfig {
 
 interface ExecLike {
   signal?: AbortSignal
+  agent?: unknown
 }
 
 async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number): Promise<WarmupResult> {
+  const binding = cfg.scopes?.fromTool(exec as ToolExec)
+  if (binding) {
+    if (!cfg.runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+    if (exec.signal?.aborted) throw new ScopeError('operation-aborted')
+    if (!script.includes('const task = await taskSpaces.useOrCreate(') && !script.includes('const task = await taskSpaces.switch(')) script = useSpace(binding.name) + script
+    script += `\nconsole.log('@@DSH_OWNERSHIP@@' + JSON.stringify({ name: task.name, id: task.id, targets: (await browser.listTabs()).map(t => t.targetId) }))\n`
+  }
   let handle
   try {
     // User-configured extra ego-browser CLI args (settings field `egoCliArgs`).
     // Filtered against EGO_CLI_BLOCKED so a saved value with a mutually-
     // exclusive subcommand (--status/--stop/--help/...) cannot break every
     // ego_* call by exiting before the heredoc runs.
-    const extraCliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
+    const extraCliArgs = binding ? [] : filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
     handle = subprocess.spawn({
       // Run through the node interpreter so the vendored CLI needs no +x bit.
       argv: [process.execPath, cfg.egoBin, 'nodejs', ...extraCliArgs],
@@ -620,6 +640,11 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
       stderr,
     }
   }
+  if (binding) {
+    const line = stdout.split('\n').findLast(line => line.startsWith('@@DSH_OWNERSHIP@@'))
+    if (!line) throw new ScopeError('ownership-unverified')
+    cfg.scopes!.record(binding.sessionId, JSON.parse(line.slice('@@DSH_OWNERSHIP@@'.length)))
+  }
   return { ok: true, value, stdout, stderr }
 }
 // ── tool plumbing ───────────────────────────────────────────────────────────
@@ -687,23 +712,23 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
       render: renderText,
     },
     timeoutMs: TOOL_TIMEOUT_MS,
-    execute: async (args: Record<string, unknown>, exec: ToolExec) =>
-      withEgoLock(async () => {
+    execute: async (args: Record<string, unknown>, exec: ToolExec) => {
         // Signal the client to auto-open the sidebar Tab on the first ego_*
         // tool call. markEgoToolCall() bumps a host-side counter surfaced via
         // /api/ego/spaces; the LivePreviewController transitions on 0 → >0 and
         // calls betterSidebar.openTab(). Idempotent: the client's transition
         // guard means only the first call per session opens the Tab.
-        markEgoToolCall(callingSessionId(exec))
+        markEgoToolCall(callingSessionId(exec), cfg.scopes?.generation)
         // Stale-space recovery (browser restart wiped the space table) is
         // handled inside runWithStaleSpaceRetry; the cold-start retry is one
         // level deeper.
-        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => opts.buildScript(args))
+        const scoped = cfg.scopes ? cfg.scopes.arguments(cfg.scopes.fromTool(exec), args, opts.name) : args
+        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => opts.buildScript(scoped))
         if (!result.ok) throw new Error(result.error)
         if (typeof opts.afterExecute === 'function') opts.afterExecute(args, result.value)
         // Value is JSON.parse output of our own payload — fits the tool JSON contract.
         return result.value
-      }),
+      },
     presentCall: () => ({
       card: 'generic',
       title: opts.name,
@@ -749,11 +774,31 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   })
 
   const spaceTracker = createActiveSpaceTracker((config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE)
+  const scopes = new SessionSpaceRegistry()
+  const control = new ControlLease()
+  const runtimeEnv = isolatedRuntimeEnv()
+  let liveSessions: EgoContext['sessions']
+  let liveAgents: EgoContext['agents']
+  ctx.inject?.(['sessions'], sctx => { liveSessions = sctx.sessions ?? sctx.get?.('sessions') as EgoContext['sessions'] })
+  ctx.inject?.(['agents'], sctx => { liveAgents = sctx.agents ?? sctx.get?.('agents') as EgoContext['agents'] })
+  const continuation = new ContinuationGate(scopes, control, sessionId => liveAgents?.get(sessionId))
+  ctx.effect?.(() => () => continuation.dispose())
+  const disposed = ctx.on?.('session/disposed', (raw) => {
+    const id = (raw as { id?: unknown } | undefined)?.id
+    if (typeof id === 'string') { continuation.revoke(id); scopes.revoke(id); control.revoke(id); revokeEgoSignals(id, scopes.generation) }
+  })
+  if (disposed) ctx.effect?.(() => disposed)
+  const activity = ctx.on?.('agent/status', raw => {
+    const event = raw as { agent?: { session?: { id?: unknown } }; status?: unknown }
+    const id = event.agent?.session?.id
+    if (typeof id === 'string' && (event.status === 'idle' || event.status === 'running')) resetEgoToolCounts(id, scopes.generation)
+  })
+  if (activity) ctx.effect?.(() => activity)
   const cfg: EgoRuntimeConfig = {
+    scopes,
+    runtimeEnv,
     egoBin:
-      typeof config.egoBin === 'string' && config.egoBin !== ''
-        ? config.egoBin
-        : DEFAULT_EGO_BIN,
+      DEFAULT_EGO_BIN,
     configuredDefaultSpace: (config.defaultSpace as string | number | undefined) ?? DEFAULT_SPACE,
     spaceTracker,
     get defaultSpace() { return this.spaceTracker.current() },
@@ -764,7 +809,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     get chromePath() {
       return resolveConfig(bridge.source() as RawConfig).chromePath
     },
-    get captureBackend() { return resolveConfig(bridge.source() as RawConfig).captureBackend },
+    get captureBackend() { return runtimeEnv ? 'cdp' : resolveConfig(bridge.source() as RawConfig).captureBackend },
     get streamProfile() { return resolveConfig(bridge.source() as RawConfig).streamProfile },
     get cdpFps() { return resolveConfig(bridge.source() as RawConfig).cdpFps },
     get cdpQuality() { return resolveConfig(bridge.source() as RawConfig).cdpQuality },
@@ -779,7 +824,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     // User-defined extra CLI args (see src/config.ts). Live getters so GUI
     // edits take effect on the next spawn / next browser cold start.
     get egoCliArgs() { return resolveConfig(bridge.source() as RawConfig).egoCliArgs },
-    get chromeArgs() { return resolveConfig(bridge.source() as RawConfig).chromeArgs },
+    get chromeArgs() { return '' },
     get isolateSpaces() { return resolveConfig(bridge.source() as RawConfig).isolateSpaces },
     get idleTimeoutMin() { return resolveConfig(bridge.source() as RawConfig).idleTimeoutMin },
     // Live getter: cast-server reads this on EVERY /api/ego/* request, so the
@@ -787,7 +832,27 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     get disableFrameRelay() { return resolveConfig(bridge.source() as RawConfig).disableFrameRelay },
   }
   const reg = (tool: ToolHandle): void => {
-    const dispose = ctx.tools.register(tool) as unknown as () => void
+    const execute = tool.execute
+    if (DISABLED_EGO_TOOLS.has(tool.name)) return
+    const guarded = { ...tool, execute: async (args: Record<string, unknown>, exec: ToolExec) => {
+      const binding = scopes.fromTool(exec)
+      if (!liveSessions) throw new ScopeError('session-service-unavailable')
+      if (liveSessions.get(binding.sessionId)?.id !== binding.sessionId) {
+        scopes.revoke(binding.sessionId); control.revoke(binding.sessionId)
+        throw new ScopeError('session-not-live')
+      }
+      if (tool.name === 'ego_http' && args.mode === 'server') throw new ScopeError('unscoped-capability-disabled')
+      if (tool.name === 'ego_download' && typeof args.triggerScript === 'string' && args.triggerScript.trim()) throw new ScopeError('unscoped-capability-disabled')
+      if (tool.name === 'ego_help' || tool.name === 'ego_doctor') return execute(args, exec as never)
+      if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+      scopes.arguments(binding, args, tool.name)
+      return withEgoLock(() => control.runAgent(binding.sessionId, exec.signal, async signal => {
+        const result = await execute(args, { ...exec, signal } as never)
+        if (result && typeof result === 'object' && (result as { ok?: boolean }).ok === false) throw new ScopeError('tool-outcome-unverified')
+        return result
+      }))
+    } }
+    const dispose = ctx.tools.register(guarded) as unknown as () => void
     // Cordis lifecycle: unregister the tool when the plugin unmounts.
     ctx.effect?.(() => dispose)
   }
@@ -811,7 +876,73 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   // forever, zero errors). The official optional-service pattern is a nested
   // inject: the callback runs only once the service is available, and no-ops
   // on hosts without a web server (TUI / headless stay tools-only).
-  ctx.inject?.(['webServer', 'connection'], (wctx) => {
+  ctx.inject?.(['webServer', 'connection', 'sessions'], (wctx) => {
+    const host: ScopedBrowserHost = {
+      scopes, control, runtimeEnv, continuation,
+      async refreshMembership(sessionId, leaseEpoch) {
+        const binding = scopes.require(sessionId)
+        if (!runtimeEnv || binding.targets.size === 0) return
+        await withEgoLock(() => control.runHuman(sessionId, leaseEpoch, async () => {
+          try {
+            const result = await runEgoScript(ctx.subprocess,
+              `const task = await taskSpaces.switch(${j(binding.name)})\nconsole.log('${SENTINEL}' + JSON.stringify({ ok: true }))\n`,
+              { agent: { session: { id: sessionId } }, signal: AbortSignal.timeout(5000) }, cfg)
+            if (!result.ok) throw new ScopeError('ownership-refresh-unverified')
+          } catch { control.revoke(sessionId); throw new ScopeError('ownership-refresh-unverified') }
+        }))
+      },
+      validateSession(sessionId) {
+        if (typeof sessionId !== 'string' || !sessionId) throw new ScopeError('session-required')
+        const sessions = wctx.sessions ?? wctx.get?.('sessions') as EgoContext['sessions']
+        if (sessions?.get(sessionId)?.id !== sessionId) {
+          try { scopes.require(sessionId); scopes.revoke(sessionId); control.revoke(sessionId) } catch { /* unbound */ }
+          throw new ScopeError('session-not-live')
+        }
+        scopes.bind(sessionId)
+        return sessionId
+      },
+      async navigate(sessionId, url, leaseEpoch, targetId) {
+        if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+        const parsed = new URL(url)
+        if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new ScopeError('url-invalid')
+        const binding = scopes.require(sessionId)
+        if (targetId !== undefined) scopes.assertTarget(sessionId, targetId)
+        const navigate = async (signal?: AbortSignal) => {
+          const result = await runWithStaleSpaceRetry(ctx, cfg, { agent: { session: { id: sessionId } }, signal }, () =>
+            `${useSpace(binding.name)}${targetId === undefined ? ensureRealTab() : `await browser.switchTab(${j(targetId)})\n`}await page.goto(${j(parsed.href)}, { wait: true, timeout: 20000 })\n` +
+            `console.log('${SENTINEL}' + JSON.stringify({ ok: true, page: await page.info() }))\n`)
+          if (!result.ok) throw new Error(result.error)
+          markEgoToolCall(sessionId, scopes.generation)
+          return result.value
+        }
+        return withEgoLock(() => leaseEpoch !== undefined
+          ? control.runHuman(sessionId, leaseEpoch, () => navigate())
+          : control.runAgent(sessionId, undefined, navigate))
+      },
+      async context(sessionId, leaseEpoch, targetId) {
+        if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+        const binding = scopes.require(sessionId)
+        if (!binding.targets.size) throw new ScopeError('owned-page-required')
+        if (targetId !== undefined) scopes.assertTarget(sessionId, targetId)
+        const read = async (signal?: AbortSignal) => {
+          const result = await runWithStaleSpaceRetry(ctx, cfg, { agent: { session: { id: sessionId } }, signal }, () =>
+            `${useSpace(binding.name)}${targetId === undefined ? ensureRealTab() : `await browser.switchTab(${j(targetId)})\n`}const info = await page.info()\n` +
+            `const text = String(await page.evaluate('document.body ? document.body.innerText : ""')).slice(0, 12000)\n` +
+            `const tabs = await browser.listTabs(); const target = ${targetId === undefined ? 'tabs.find(t => t.active) ?? tabs[0]' : `tabs.find(t => t.targetId === ${j(targetId)})`}\n` +
+            `console.log('${SENTINEL}' + JSON.stringify({ ok: true, targetId: target?.targetId, url: info.url, title: info.title, text }))\n`)
+          if (!result.ok) throw new Error(result.error)
+          const value = result.value as { targetId?: string }
+          scopes.assertTarget(sessionId, value.targetId)
+          const context = value as { targetId?: string; url?: string; title?: string; text?: string }
+          let url = ''
+          try { const parsed = new URL(context.url ?? ''); parsed.search = ''; parsed.hash = ''; parsed.username = ''; parsed.password = ''; url = parsed.href } catch { /* unavailable URL */ }
+          return { targetId: context.targetId, url, title: String(context.title ?? '').slice(0, 512), text: String(context.text ?? '').slice(0, 12000) }
+        }
+        return withEgoLock(() => leaseEpoch !== undefined
+          ? control.runHuman(sessionId, leaseEpoch, () => read())
+          : control.runAgent(sessionId, undefined, read))
+      },
+    }
     try {
       initCastServer(
         wctx as EgoContext,
@@ -820,6 +951,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         ffmpegManager,
         () => openAgentWindow(ctx, cfg),
         (opts) => importLoginCookies(opts, { subprocess: ctx.subprocess }),
+        host,
       )
     } catch (err) {
       ctx.logger?.warn?.(
@@ -845,18 +977,19 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   // (2-4s). Watching the panel does NOT count as activity (documented in the
   // setting hint). Runs on a 60s interval; cleanup clears the timer.
   ctx.effect?.(() => {
-    if (cfg.idleTimeoutMin <= 0) return
+    if (cfg.idleTimeoutMin <= 0 || !runtimeEnv) return
     let reapedFor = 0 // the activity timestamp we already reaped for
     const timer = setInterval(() => {
       void (async () => {
         try {
           const last = getLastEgoActivity()
+          if (control.status('').state !== 'idle') return
           if (!shouldReapBrowser(Date.now(), last, cfg.idleTimeoutMin)) return
           if (last <= reapedFor) return // already reaped for this idle stretch
           // Only reap when the state file says a browser is up. A stale
           // browser.json makes --stop a harmless no-op, so no pid liveness
           // check is needed here.
-          const e = process.env
+          const e = runtimeEnv
           const isWin = process.platform === 'win32'
           const home = e.HOME || e.USERPROFILE || (isWin ? e.LOCALAPPDATA || '' : homedir())
           const stateDir =
@@ -891,16 +1024,11 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     }, 60_000)
     return () => clearInterval(timer)
   }, 'ego-browser: idle reaper')
-  // Graceful teardown: stop the persistent browser when the plugin unmounts.
-  // CRITICAL: this must be fire-and-forget, NOT awaited. Awaiting `--stop`
-  // (which asks the browser to graceful-close, ~seconds) stalls the host process
-  // teardown when DSH is killed/restarted. With a self-healing guard that kills
-  // web and expects the old process to exit promptly before restarting it, a
-  // slow/frozen browser here hangs the restart forever ("waiting to restart").
-  // Losing in-memory login cookies on a dirty shutdown beats a restart that
-  // never completes — the clean path still flushes cookies on a graceful DSH
-  // close, and ego_auth_flush exists for explicit persistence.
-  ctx.effect?.(() => {
+  // Fence new work and drain actual operations before stopping this isolated runtime.
+  ctx.effect?.(() => async () => {
+    continuation.dispose()
+    await control.dispose()
+    if (!runtimeEnv) return
     try {
       const handle = ctx.subprocess.spawn({
         argv: [process.execPath, cfg.egoBin, '--stop'],
@@ -918,15 +1046,13 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         // what keeps logins across a restart (original ego-lite behavior).
         graceMs: 8_000,
       })
-      // Fire and forget: do NOT return this promise from the effect cleanup.
-      handle.done.catch(() => {
-        /* ignore */      })
+      await handle.done.catch(() => null)
     } catch {
       // never let teardown throw
     }
   })
   ctx.logger?.info?.(
-    `ego-browser: mounted (egoBin=${cfg.egoBin}, defaultSpace=${cfg.defaultSpace})`,
+    `ego-browser: mounted with session-owned spaces (runtime=${runtimeEnv ? 'isolated' : 'disabled-unconfigured'})`,
   )
 }
 /** `ego_status` probes CLI availability by running the real `--status` path. */
@@ -1180,24 +1306,20 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
   const spaceParam = {
     type: 'string',
     description:
-      'Task-space name or numeric id; defaults to the most recently opened or explicitly selected space.',
+      'Optional owned task-space name or id; the host always selects the actual execution session space. Foreign or global default spaces are rejected.',
   }
   reg(
     t({
       name: 'ego_space_open',
       get description() {
-        return cfg.isolateSpaces
-          ? 'Open (or reuse) an ego-lite task space in isolated sandbox mode.'
-          : "Open (or reuse) the ego-lite task space. In persistent profile mode (default), ALWAYS use or reuse the single 'default' space. Login credentials automatically persist on disk across restarts — if a page requires login, prompt user to log in manually in the opened window. DO NOT create numbered spaces like #4, #5."
+        return 'Open or reuse the real execution session browser space. The host assigns its physical name. Spaces do not provide account or cookie isolation.'
       },
       parameters: {
         name: {
           type: 'string',
           required: true,
           get description() {
-            return cfg.isolateSpaces
-              ? 'Task-space name or numeric id.'
-              : "Task-space name. In persistent mode, ALWAYS specify 'default'. Reuse this single space for all browsing tasks."
+            return 'Display intent only; the host assigns this session owned physical space name.'
           },
         },
       },
@@ -1903,17 +2025,12 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
     t({
       name: 'ego_download',
       description:
-        'Wait for a file download triggered by the current action, then return its saved path. Provide `triggerSelector` (a download button/link to click) or `triggerScript` (arbitrary JS that triggers the download). The file is captured into a temp dir and (optionally) copied to `savePath`. Returns { path, suggestedFilename, url }.',
+        'Wait for an owned-page download triggered by a selector click or earlier navigation, then return its saved path. Optional savePath copies the captured file. Raw trigger scripts are disabled.',
       parameters: {
         triggerSelector: {
           type: 'string',
           description:
             'CSS selector of the element (button/link) whose click starts the download.',
-        },
-        triggerScript: {
-          type: 'string',
-          description:
-            'Full JS snippet that triggers the download (e.g. window.open() or a fetch-to-blob download); runs in the page before waiting for the download.',
         },
         savePath: {
           type: 'string',
@@ -1928,15 +2045,11 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
       },
       buildScript: (args) => {
         const sel = str(args.triggerSelector, '')
-        const script = str(args.triggerScript, '')
         const savePath = str(args.savePath, '')
         const timeout = num(args.timeout, 30000)
         const trigger =
-          sel !== ''
-            ? `await page.locator(${j(sel)}).click()\n`
-            : script !== ''
-              ? `await page.evaluate(() => { ${script} })\n`
-              : '/* no trigger given — the download may be started by an earlier navigation */\n'
+          sel !== '' ? `await page.locator(${j(sel)}).click()\n`
+            : '/* no trigger given — the download may be started by an earlier navigation */\n'
         const save =
           savePath !== ''
             ? `const __final = await __dl.saveAs(${j(savePath)}).catch(()=>null)\n`
@@ -2006,14 +2119,14 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
     t({
       name: 'ego_http',
       description:
-        "Make an HTTP request and return status + body. Default runs in the agent page's browser context (cross-origin allowed when the server's CORS permits); set `mode: server` to use Node-side fetch.server. Use to scrape an API, POST data, or hit a service. (Note: on the vendored ego-linux Windows runtime, fetch.server can hit a libuv crash, so prefer the default browser mode there.)",
+        "Make an HTTP request from the owned page browser context and return status + body. Cross-origin requests require CORS. Node/server fetch is disabled.",
       parameters: {
         url: { type: 'string', required: true, description: 'Absolute URL to request.' },
         method: { type: 'string', description: 'HTTP method, default GET.' },
         headers: { type: 'object', additionalProperties: true, description: "Request headers, e.g. { 'Content-Type': 'application/json' }." },
         body: { type: 'string', description: 'Request body (for POST/PUT).' },
         timeout: { type: 'number', description: 'Timeout in ms (default 20000).' },
-        mode: { type: 'string', description: "'browser' (default) runs via the page context; 'server' uses Node-side fetch.server." },
+        mode: { type: 'string', description: "Only 'browser' is supported; server mode is disabled." },
         space: spaceParam,
       },
       buildScript: (args) => {
@@ -2069,7 +2182,7 @@ function registerActionTools(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (tool:
         },
         timeoutMs: TOOL_TIMEOUT_MS,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
-          markEgoToolCall(callingSessionId(exec))
+          markEgoToolCall(callingSessionId(exec), cfg.scopes?.generation)
           const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => str(args.script, ''))
           if (!result.ok) throw new Error(result.error)
           const parsed = parseSentinel(result.stdout)
@@ -2116,14 +2229,13 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
         render: renderText,
       },
       timeoutMs: 15_000,
-      execute: async (args: Record<string, unknown>, exec: ToolExec) =>
-        withEgoLock(async () => {
-          markEgoToolCall(callingSessionId(exec))
+      execute: async (args: Record<string, unknown>, exec: ToolExec) => {
+          markEgoToolCall(callingSessionId(exec), cfg.scopes?.generation)
           const result = await runWithStaleSpaceRetry(
             ctx,
             cfg,
-            { signal: exec?.signal } as ToolExec,
-            () => humanCheckScript(str(args.space, cfg.defaultSpace)),
+            exec,
+            () => humanCheckScript(cfg.scopes!.arguments(cfg.scopes!.fromTool(exec), args, 'ego_captcha').space as string),
           )
           if (!result.ok)
             return { ok: false, detected: false, kind: null, error: result.error }
@@ -2134,7 +2246,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
             detected: !!hc?.detected,
             kind: hc?.kind ?? null,
           }
-        }),
+        },
       presentCall: () => ({ card: 'generic', title: 'ego_captcha', kind: 'other', rawInput: null }),
     } as unknown as DefineToolOpts),
   )
@@ -2165,6 +2277,11 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       timeoutMs: 10_000,
       execute: async (args: Record<string, unknown>) => {
         const q = str(args.topic, '').trim().toLowerCase()
+        if (cfg.scopes) {
+          const overview = '每个工具使用真实执行会话的独立任务空间；空间不提供账号或 cookie 隔离。人工接管后须明确提交继续授权。工具：' + SCOPED_EGO_TOOL_NAMES.join(', ')
+          const safe = !['overview', 'tools', 'login', 'script', 'network', 'download'].includes(q) && !DISABLED_EGO_TOOLS.has(q) ? EGO_HELP_INDEX[q] : undefined
+          return { ok: true, topic: q || 'overview', text: safe ?? overview }
+        }
         const key = Object.prototype.hasOwnProperty.call(EGO_HELP_INDEX, q) ? q : ''
         const text = key
           ? EGO_HELP_INDEX[key]!
@@ -2197,6 +2314,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
       },
       timeoutMs: 25_000,
       execute: async () => {
+        if (!cfg.runtimeEnv) return { ok: false, report: 'isolated-runtime-unconfigured' }
         const lines: string[] = []
         // vendored runtime
         lines.push(`egoBin: ${cfg.egoBin}`)
@@ -2213,13 +2331,13 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
         // args take effect on the next ego_* call; Chrome args only on the next
         // browser cold start (the browser is a singleton — run `ego-browser
         // --stop` or restart DSH to relaunch).
-        const cliArgs = filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
-        const chrArgs = filterArgs(cfg.chromeArgs ?? '', CHROME_BLOCKED)
+        const cliArgs = cfg.scopes ? [] : filterArgs(cfg.egoCliArgs ?? '', EGO_CLI_BLOCKED)
+        const chrArgs = cfg.scopes ? [] : filterArgs(cfg.chromeArgs ?? '', CHROME_BLOCKED)
         lines.push(`egoCliArgs (effective): ${cliArgs.length ? cliArgs.join(' ') : '(none)'}`)
         lines.push(`chromeArgs (effective, next cold start): ${chrArgs.length ? chrArgs.join(' ') : '(none)'}`)
         // state dir + runtime state
         const isWin = process.platform === 'win32'
-        const e = process.env
+        const e = cfg.runtimeEnv
         const home = e.HOME || e.USERPROFILE || (isWin ? e.LOCALAPPDATA || '' : homedir())
         const stateDir =
           e.EGO_LINUX_STATE_DIR ||
@@ -2289,7 +2407,7 @@ function registerHelpAndDoctor(ctx: EgoContext, cfg: EgoRuntimeConfig, reg: (too
         },
         timeoutMs: TOOL_TIMEOUT_MS,
         execute: async (args: Record<string, unknown>, exec: ToolExec) => {
-          markEgoToolCall(callingSessionId(exec))
+          markEgoToolCall(callingSessionId(exec), cfg.scopes?.generation)
           // Honor the documented per-run timeout override (integer ms). Falls
           // back to the plugin's default grace when absent/invalid.
           const timeoutMs =

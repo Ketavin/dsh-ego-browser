@@ -115,7 +115,21 @@ export interface EgoContext {
   inject?(services: readonly string[], fn: (sctx: EgoContext) => void): void
   on?(event: string, fn: (...args: unknown[]) => unknown): () => void
   settings?: SettingsService
+  sessions?: { get(sessionId: string): { id: string } | undefined }
+  agents?: { get(sessionId: string): import('./continuation-gate.ts').ContinuationAgent | undefined }
   fiber?: { state?: number }
+}
+
+/** Host-only bridge consumed by cast routes; never an authenticated HTTP identity. */
+export interface ScopedBrowserHost {
+  scopes: import('./session-spaces.ts').SessionSpaceRegistry
+  control: import('./control-lease.ts').ControlLease
+  runtimeEnv?: NodeJS.ProcessEnv
+  continuation?: import('./continuation-gate.ts').ContinuationGate
+  validateSession(sessionId: unknown): string
+  navigate(sessionId: string, url: string, leaseEpoch?: unknown, targetId?: unknown): Promise<unknown>
+  context(sessionId: string, leaseEpoch?: unknown, targetId?: unknown): Promise<unknown>
+  refreshMembership?(sessionId: string, leaseEpoch: number): Promise<void>
 }
 
 /** Resolved (post-defaults) runtime config — the canonical key set. */

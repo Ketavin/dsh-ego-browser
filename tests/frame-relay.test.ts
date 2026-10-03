@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { initCastServer, stopCastWorker, FRAME_RELAY_DISABLED } from "../src/cast-server.ts";
 import { resolveConfig } from "../src/config.ts";
+import { SessionSpaceRegistry } from "../src/session-spaces.ts";
+import { ControlLease } from "../src/control-lease.ts";
 
 // ── frame-relay master switch (settings: disableFrameRelay) ─────────────────
 //
@@ -121,9 +123,9 @@ function makeRes() {
 function makeReq(path: string, method = "GET") {
   return {
     method,
-    url: path,
+    url: path + '?sessionId=A&targetId=tab-1',
     headers: { host: "127.0.0.1:3080", "content-type": "application/json" },
-    async *[Symbol.asyncIterator]() { /* empty body */ },
+    async *[Symbol.asyncIterator]() { if (method === 'POST') yield Buffer.from(JSON.stringify({ sessionId: 'A', requestId: path, clientId: 'fixture', targetId: 'tab-1', leaseEpoch: 1 })); },
   };
 }
 
@@ -175,7 +177,14 @@ function mount(
     source: () => live,
     onChange(cb: () => void) { listeners.add(cb); return () => listeners.delete(cb); },
   };
-  initCastServer(ctx as never, live as never, bridge as never, null, opts.openAgentWindow as never, opts.loginImport as never);
+  const scopes = new SessionSpaceRegistry(), control = new ControlLease();
+  const binding = scopes.bind('A'); scopes.record('A', { name: binding.name, targets: ['tab-1'] });
+  void control.takeOver('A');
+  initCastServer(ctx as never, live as never, bridge as never, null, opts.openAgentWindow as never, opts.loginImport as never, {
+    scopes, control, runtimeEnv: { ...process.env, EGO_LINUX_STATE_DIR: CAST_DIR, DSH_EGO_SCOPED_WORKER: '1' },
+    validateSession: id => { if (id !== 'A') throw new Error('unknown fixture session'); return id; },
+    navigate: async () => { throw new Error('not used'); }, context: async () => { throw new Error('not used'); },
+  });
   return {
     spawns,
     fire: () => { for (const cb of [...listeners]) cb(); },
@@ -199,14 +208,11 @@ const GATED_ROUTES = [
   "/api/ego/stream",
   "/api/ego/health",
   "/api/ego/watch/status",
-  "/api/ego/video/status",
-  "/api/ego/video",
 ];
 /** Worker-backed POST routes (watch leases + panel actions). */
 const GATED_POST_ROUTES = [
   "/api/ego/input",
   "/api/ego/close",
-  "/api/ego/flush",
   "/api/ego/watch/start",
   "/api/ego/watch/switch",
   "/api/ego/watch/stop",
@@ -257,16 +263,18 @@ describe("frame relay disabled", () => {
     expect(res.statusCode).toBe(403);
   });
 
-  it("leaves the non-relay routes working (raise / login-import are not frame paths)", async () => {
+  it("keeps global/native-window and login-import capabilities disabled", async () => {
     let raised = 0;
     let imported = 0;
     const h = mount(resolveConfig({ disableFrameRelay: true }), {
       openAgentWindow: async () => { raised += 1; return { ok: true }; },
       loginImport: async () => { imported += 1; return { ok: true, imported: 3 }; },
     });
-    expect(parseBody(await h.invoke("/api/ego/raise", makeReq("/api/ego/raise", "POST"))).ok).toBe(true);
-    expect(parseBody(await h.invoke("/api/ego/login-import", makeReq("/api/ego/login-import", "POST"))).ok).toBe(true);
-    expect([raised, imported]).toEqual([1, 1]);
+    for (const path of ['/api/ego/raise', '/api/ego/login-import', '/api/ego/flush']) {
+      expect(parseBody(await h.invoke(path, makeReq(path, 'POST'))).code).toBe('unscoped-capability-disabled');
+    }
+    for (const path of ['/api/ego/video', '/api/ego/video/status']) expect(parseBody(await h.invoke(path)).code).toBe('unscoped-capability-disabled');
+    expect([raised, imported]).toEqual([0, 0]);
   });
 });
 

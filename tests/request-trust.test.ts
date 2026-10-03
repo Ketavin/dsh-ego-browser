@@ -43,7 +43,7 @@ describe('Host desktop request boundary', () => {
 
   it('guards every exact cast route and settings prefix before side effects', async () => {
     const { routes, fence, actions } = mount(403)
-    expect(routes).toHaveLength(15)
+    expect(routes).toHaveLength(25)
     for (const route of routes) {
       const req = { method: 'POST', headers: { cookie: 'dsh-auth-fake=1', 'content-type': 'application/json' } }
       const res = response()
@@ -69,12 +69,12 @@ describe('Host desktop request boundary', () => {
     expect(actions.raise).not.toHaveBeenCalled()
   })
 
-  it('permits a Host-approved request without fabricating a login cookie', async () => {
+  it('passes the Host fence without a login cookie but requires the scoped host service', async () => {
     const { routes } = mount(undefined)
     const route = routes.find(route => route.path === '/api/ego/spaces')!
     const res = response()
     await route.handler({ method: 'GET', headers: {} }, res)
-    expect(res.statusCode).toBe(200)
-    expect(JSON.parse(res.body).reason).toBe(FRAME_RELAY_DISABLED)
+    expect(res.statusCode).toBe(409)
+    expect(JSON.parse(res.body).code).toBe('scope-service-unavailable')
   })
 })

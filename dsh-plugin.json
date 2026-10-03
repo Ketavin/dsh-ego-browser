@@ -2,7 +2,7 @@
   "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
   "id": "dsh-ego-browser",
   "name": "ego-browser",
-  "version": "0.8.5",
+  "version": "0.8.6-dsh-rc2.1",
   "manifestVersion": "0.15",
   "facets": {
     "host": {
@@ -62,7 +62,7 @@
               ],
               "label": "任务空间沙盒隔离 (Space isolation)",
               "kind": "boolean",
-              "hint": "默认关闭：使用磁盘持久化 Profile，任务中登录的账号跨电脑重启永久保留；开启后使用内存临时沙盒隔离，任务结束不落盘。"
+              "hint": "仅在专用 Agent Chrome 内选择默认 cookie jar 或独立内存 context。任务页签归属与账号 cookie 隔离不同；真实登录和持久化重启尚未验收。"
             },
             {
               "path": [
@@ -70,7 +70,7 @@
               ],
               "label": "空闲自动回收 (Idle auto-stop, minutes)",
               "kind": "number",
-              "hint": "N 分钟没有任何 ego_* 调用后自动关闭后台浏览器进程（0 = 关闭此功能）。下次调用会自动冷启动（约 2-4 秒）。观察窗正在观看不算活动。"
+              "hint": "仅用于专用隔离运行时。0 关闭自动回收；冷启动时重新验证任务归属。已有登录持久化与运行时复用尚未验收。"
             },
             {
               "path": [
@@ -84,20 +84,12 @@
               "path": [
                 "captureBackend"
               ],
-              "label": "Capture backend",
+              "label": "Capture backend (rc.2 candidate: CDP only)",
               "kind": "select",
               "options": [
                 {
-                  "value": "auto",
-                  "label": "Auto"
-                },
-                {
                   "value": "cdp",
                   "label": "CDP"
-                },
-                {
-                  "value": "ffmpeg",
-                  "label": "FFmpeg"
                 }
               ]
             },
@@ -121,14 +113,6 @@
                   "label": "Speed"
                 }
               ]
-            },
-            {
-              "path": [
-                "ffmpegPath"
-              ],
-              "label": "FFmpeg binary path",
-              "kind": "text",
-              "hint": "Path to ffmpeg. Empty = auto-detect / on-demand install."
             }
           ]
         }
