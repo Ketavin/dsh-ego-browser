@@ -28,6 +28,9 @@ export class ContinuationGate {
     return { continuationId: entry.id, leaseEpoch: entry.epoch, hostGeneration: entry.generation, marker: entry.marker, expiresAt: entry.expiresAt }
   }
   async prepare(sessionId: string, epoch: unknown) {
+    return this.control.withHumanDrain(sessionId, epoch, () => this.prepareDrained(sessionId, epoch))
+  }
+  private async prepareDrained(sessionId: string, epoch: unknown) {
     this.scopes.require(sessionId)
     this.control.assertContinuationReady(sessionId, epoch)
     if (this.active) throw new ScopeError('continuation-busy')

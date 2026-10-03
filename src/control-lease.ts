@@ -13,6 +13,7 @@ export class ControlLease {
   private inputWatermark?: { sessionId: string; epoch: number; sequence: number }
   private humanChain: Promise<unknown> = Promise.resolve()
   private queuedHuman = 0
+  private endingHuman = false
   private queuedInputs = 0
   private heldInputs = new Map<string, Record<string, unknown>>()
   private armAllowed = false
@@ -63,6 +64,10 @@ export class ControlLease {
   /** Reads, membership refreshes and input share one bounded human operation queue. */
   async runHuman<T>(sessionId: string, epoch: unknown, operation: () => Promise<T>): Promise<T> {
     this.assertHuman(sessionId, epoch)
+    if (this.endingHuman) throw new ScopeError('control-busy')
+    return this.enqueueHuman(sessionId, epoch, operation)
+  }
+  private async enqueueHuman<T>(sessionId: string, epoch: unknown, operation: () => Promise<T>): Promise<T> {
     if (this.queuedHuman >= 1024) throw new ScopeError('control-busy')
     this.queuedHuman++
     const queued = this.humanChain.then(async () => {
@@ -86,16 +91,37 @@ export class ControlLease {
     const key = JSON.stringify([sessionId, action, requestId])
     const previous = this.requests.get(key)
     if (previous && previous.expiresAt > this.now()) return previous.promise as Promise<T>
+    if (this.endingHuman) throw new ScopeError('control-busy')
     const watermark = this.inputWatermark
     if (watermark?.sessionId === sessionId && watermark.epoch === epoch && sequence <= watermark.sequence) throw new ScopeError('input-sequence-stale')
     this.inputWatermark = { sessionId, epoch: epoch as number, sequence }
     this.queuedInputs++
     try {
       return this.once(sessionId, requestId, action, () => {
-        const flight = this.runHuman(sessionId, epoch, operation)
+        // This input was already admitted before an explicit drain fence.
+        const flight = this.enqueueHuman(sessionId, epoch, operation)
         return flight.finally(() => { this.queuedInputs-- })
       })
     } catch (error) { this.queuedInputs--; throw error }
+  }
+  /** Explicit release/continue blocks new producers, then waits for accepted work. */
+  async withHumanDrain<T>(sessionId: string, epoch: unknown, operation: () => Promise<T>, timeoutMs = 5000): Promise<T> {
+    this.owned(sessionId, epoch)
+    if (this.endingHuman) throw new ScopeError('control-busy')
+    this.endingHuman = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      // once() schedules an already-admitted input on a microtask. Let it join the queue.
+      await Promise.resolve()
+      await Promise.race([this.humanChain, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ScopeError('control-drain-timeout')), timeoutMs)
+      })])
+      this.owned(sessionId, epoch)
+      return await operation()
+    } finally {
+      if (timer) clearTimeout(timer)
+      this.endingHuman = false
+    }
   }
   noteInput(payload: Record<string, unknown>, completed: boolean): void {
     const type = payload.type

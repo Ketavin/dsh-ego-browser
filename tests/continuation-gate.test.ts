@@ -28,6 +28,22 @@ const message = (id: string, text: string): Message => ({ id, source: { kind: 'u
 afterEach(() => vi.useRealTimers())
 
 describe('continuation admission at the public rc.2 maintenance seam (fixtures)', () => {
+  it('drains a concurrent membership refresh and accepted input before taking the maintenance claim', async () => {
+    const h = await harness()
+    let finish!: () => void, inputs = 0
+    const refresh = h.control.runHuman('A', h.human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const input = h.control.runHumanInput('A', h.human.leaseEpoch, 1, 'last-accepted-input', async () => { inputs++ })
+    const prepared = h.gate.prepare('A', h.human.leaseEpoch)
+    expect(h.fixture.busy()).toBe(false)
+    await expect(h.control.runHuman('A', h.human.leaseEpoch, async () => {})).rejects.toThrow('control-busy')
+    finish(); await refresh; await input
+    const receipt = await prepared
+    expect(inputs).toBe(1); expect(h.fixture.busy()).toBe(true); expect(h.control.status('A').state).toBe('paused')
+    h.fixture.nextTurn.push(message('new', receipt.marker))
+    expect(h.gate.commit('A', receipt.continuationId, receipt.leaseEpoch).admitted).toBe(true)
+    expect(h.control.status('A').state).toBe('armed')
+  })
   it('blocks all browser tools until an actual new marked user message exists, then arms before releasing maintenance', async () => {
     const h = await harness()
     h.fixture.nextTurn.push(message('old', 'Previously queued work'))

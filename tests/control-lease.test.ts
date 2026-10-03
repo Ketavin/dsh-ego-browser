@@ -164,4 +164,39 @@ describe('shared browser control lease', () => {
     expect((await settled).every(result => result.status === 'rejected')).toBe(true)
     expect(dispatched).toBe(0)
   })
+  it('fences new producers while release drains refresh and already-admitted input exactly once', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    let finish!: () => void, dispatched = 0
+    const refresh = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const input = lease.runHumanInput('A', human.leaseEpoch, 1, 'admitted', async () => { dispatched++ })
+    const release = lease.withHumanDrain('A', human.leaseEpoch, async () => lease.release('A', human.leaseEpoch))
+    expect(lease.runHumanInput('A', human.leaseEpoch, 1, 'admitted', async () => { dispatched++ })).toBe(input)
+    expect(() => lease.runHumanInput('A', human.leaseEpoch, 2, 'new-input', async () => { dispatched++ })).toThrow('control-busy')
+    await expect(lease.runHuman('A', human.leaseEpoch, async () => {})).rejects.toThrow('control-busy')
+    finish(); await refresh; await input
+    expect((await release).state).toBe('paused'); expect(dispatched).toBe(1)
+  })
+  it('rechecks revoked leases and held inputs after an explicit drain before release', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    let finish!: () => void, transitions = 0
+    const refresh = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const drain = lease.withHumanDrain('A', human.leaseEpoch, async () => { transitions++ })
+    const refused = expect(drain).rejects.toThrow('lease-not-owned')
+    lease.revoke('A'); finish(); await refresh; await refused; expect(transitions).toBe(0)
+    const other = new ControlLease(), control = await other.takeOver('A')
+    other.noteInput({ targetId: 'one', type: 'keyDown', key: 'Shift' }, true)
+    await expect(other.withHumanDrain('A', control.leaseEpoch, async () => other.release('A', control.leaseEpoch))).rejects.toThrow('human-input-held')
+    expect(other.status('A').state).toBe('human')
+  })
+  it('times out an explicit drain without dispatching the transition or removing the queue fence', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    let finish!: () => void, transitions = 0
+    const refresh = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    await expect(lease.withHumanDrain('A', human.leaseEpoch, async () => { transitions++ }, 5)).rejects.toThrow('control-drain-timeout')
+    expect(transitions).toBe(0); expect(() => lease.release('A', human.leaseEpoch)).toThrow('control-busy')
+    finish(); await refresh; expect(lease.release('A', human.leaseEpoch).state).toBe('paused')
+  })
 })

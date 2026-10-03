@@ -752,7 +752,8 @@ export function initCastServer(
           return { ...controlBody(sessionId), continuation }
         }
         if (path === EGO_CONTROL_TAKEOVER_ROUTE) await host!.control.takeOver(sessionId)
-        else if (path === EGO_CONTROL_RELEASE_ROUTE) host!.control.release(sessionId, body.leaseEpoch)
+        else if (path === EGO_CONTROL_RELEASE_ROUTE) await host!.control.withHumanDrain(sessionId, body.leaseEpoch,
+          async () => host!.control.release(sessionId, body.leaseEpoch))
         return controlBody(sessionId)
       })
       return sendJson(res, 200, result)

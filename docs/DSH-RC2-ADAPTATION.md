@@ -1,6 +1,6 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-rc2.3`. Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-rc2.4`. Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -138,3 +138,13 @@ force. Release, continuation, arm and disposal account for the whole queue.
 The initial watch status uses neutral text so tool auto-open does not incorrectly
 report that no page has opened. The final installed combined UI must be rerun
 against rc2.3; rc2.2 failure screenshots and receipts are retained.
+
+The rc2.4 follow-up makes the explicit release/continue boundary wait for that
+queue. It rejects new human producers while draining previously accepted work,
+with a five-second bound, then repeats exact ownership/epoch and the original
+ready/held-input/state checks. Duplicate accepted input retains its original
+receipt; a refused new input does not advance the sequence watermark. The
+continuation gate wraps its original synchronous public maintenance claim
+after the drain, preserving durable marker admission before arming. rc2.3 UI
+proved two clicks and Chinese inputs, but its continue could still collide with
+an ongoing refresh. The final installed UI must now be rerun against rc2.4.
