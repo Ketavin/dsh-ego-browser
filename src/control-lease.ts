@@ -11,7 +11,8 @@ export class ControlLease {
   private inFlight?: Promise<unknown>
   private requests = new Map<string, { promise: Promise<unknown>; settled: boolean; expiresAt: number }>()
   private inputWatermark?: { sessionId: string; epoch: number; sequence: number }
-  private inputChain: Promise<unknown> = Promise.resolve()
+  private humanChain: Promise<unknown> = Promise.resolve()
+  private queuedHuman = 0
   private queuedInputs = 0
   private heldInputs = new Map<string, Record<string, unknown>>()
   private armAllowed = false
@@ -59,15 +60,24 @@ export class ControlLease {
       if (this.epoch === epoch && this.state === 'agent') { this.state = 'idle'; this.sessionId = undefined }
     }
   }
-  /** Held across the actual asynchronous input/close, so release cannot race it. */
+  /** Reads, membership refreshes and input share one bounded human operation queue. */
   async runHuman<T>(sessionId: string, epoch: unknown, operation: () => Promise<T>): Promise<T> {
     this.assertHuman(sessionId, epoch)
-    if (this.inFlight) throw new ScopeError('control-busy')
-    const flight = Promise.resolve().then(operation)
-    this.inFlight = flight
-    try { return await flight }
-    catch (error) { this.humanOutcomeUnverified(sessionId); throw error }
-    finally { if (this.inFlight === flight) this.inFlight = undefined }
+    if (this.queuedHuman >= 1024) throw new ScopeError('control-busy')
+    this.queuedHuman++
+    const queued = this.humanChain.then(async () => {
+      // A lease can expire, be revoked or be disposed while this waits behind a refresh.
+      this.assertHuman(sessionId, epoch)
+      if (this.inFlight) throw new ScopeError('control-busy')
+      const flight = Promise.resolve().then(operation)
+      this.inFlight = flight
+      try { return await flight }
+      catch (error) { this.humanOutcomeUnverified(sessionId); throw error }
+      finally { if (this.inFlight === flight) this.inFlight = undefined }
+    })
+    this.humanChain = queued.then(() => undefined, () => undefined)
+    try { return await queued }
+    finally { this.queuedHuman-- }
   }
   runHumanInput<T>(sessionId: string, epoch: unknown, sequence: unknown, requestId: string, operation: () => Promise<T>): Promise<T> {
     this.assertHuman(sessionId, epoch)
@@ -82,8 +92,7 @@ export class ControlLease {
     this.queuedInputs++
     try {
       return this.once(sessionId, requestId, action, () => {
-        const flight = this.inputChain.then(() => this.runHuman(sessionId, epoch, operation))
-        this.inputChain = flight.then(() => undefined, () => undefined)
+        const flight = this.runHuman(sessionId, epoch, operation)
         return flight.finally(() => { this.queuedInputs-- })
       })
     } catch (error) { this.queuedInputs--; throw error }
@@ -134,7 +143,7 @@ export class ControlLease {
   }
   release(sessionId: string, epoch: unknown) {
     this.owned(sessionId, epoch)
-    if (this.inFlight || this.queuedInputs) throw new ScopeError('control-busy')
+    if (this.inFlight || this.queuedHuman || this.queuedInputs) throw new ScopeError('control-busy')
     if (this.heldInputs.size) throw new ScopeError('human-input-held')
     if (!['human', 'armed'].includes(this.state)) throw new ScopeError('release-state-invalid')
     this.state = 'paused'; this.armAllowed = true; this.epoch++
@@ -142,7 +151,7 @@ export class ControlLease {
   }
   assertContinuationReady(sessionId: string, epoch: unknown): void {
     this.owned(sessionId, epoch)
-    if (this.inFlight || this.queuedInputs) throw new ScopeError('control-busy')
+    if (this.inFlight || this.queuedHuman || this.queuedInputs) throw new ScopeError('control-busy')
     if (this.heldInputs.size) throw new ScopeError('human-input-held')
     if (this.unsafePause || (this.state !== 'human' && !(this.state === 'paused' && this.armAllowed))) throw new ScopeError('continuation-state-invalid')
   }
@@ -157,7 +166,7 @@ export class ControlLease {
   }
   arm(sessionId: string, epoch: unknown) {
     this.owned(sessionId, epoch)
-    if (this.state !== 'paused' || this.inFlight) throw new ScopeError('arm-state-invalid')
+    if (this.state !== 'paused' || this.inFlight || this.queuedHuman) throw new ScopeError('arm-state-invalid')
     if (!this.armAllowed) throw new ScopeError('cancellation-unverified')
     this.state = 'armed'; this.epoch++
     return this.status(sessionId)
@@ -170,7 +179,7 @@ export class ControlLease {
   async dispose(): Promise<void> {
     this.disposed = true; this.state = 'paused'; this.armAllowed = false; this.epoch++
     this.controller?.abort(new Error('plugin disposed'))
-    await Promise.allSettled([this.inFlight, this.inputChain])
+    await Promise.allSettled([this.inFlight, this.humanChain])
   }
   once<T>(sessionId: string, requestId: string, action: string, operation: () => Promise<T> | T): Promise<T> {
     if (!requestId || requestId.length > 128) throw new ScopeError('request-id-required')

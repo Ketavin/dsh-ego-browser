@@ -1,6 +1,6 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-rc2.2`. Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-rc2.3`. Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -128,3 +128,13 @@ peer installation is disabled; the frozen lockfile is required. The package
 pins the reviewed rc.2 peers and does not authorize an overall Core upgrade.
 P1–P6 ship together only after individual and combined acceptance. This source
 candidate does not itself authorize production promotion or account login.
+
+The rc2.3 follow-up fixes a real combined-UI failure in rc2.2: human input could
+receive `control-busy` while the background membership refresh held the browser
+lease. Human refresh, page reads and input now share one queue bounded at 1024
+operations. Every queued operation rechecks the exact Session/lease before
+dispatch; input sequence, deduplication and held-input release rules remain in
+force. Release, continuation, arm and disposal account for the whole queue.
+The initial watch status uses neutral text so tool auto-open does not incorrectly
+report that no page has opened. The final installed combined UI must be rerun
+against rc2.3; rc2.2 failure screenshots and receipts are retained.

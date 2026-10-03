@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ControlLease } from '../src/control-lease.ts'
 
 describe('shared browser control lease', () => {
@@ -7,7 +7,7 @@ describe('shared browser control lease', () => {
     const human = await lease.takeOver('A')
     let finish!: () => void
     const input = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
-    await Promise.resolve()
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
     await expect(lease.runAgent('A', undefined, async () => {})).rejects.toThrow('agent-control-blocked')
     expect(() => lease.assertHuman('B', human.leaseEpoch)).toThrow('lease-not-owned')
     expect(() => lease.release('A', human.leaseEpoch)).toThrow('control-busy')
@@ -110,7 +110,7 @@ describe('shared browser control lease', () => {
     const lease = new ControlLease(), human = await lease.takeOver('A')
     let finish!: () => void, nextCalls = 0
     const first = lease.runHumanInput('A', human.leaseEpoch, 1, 'first', () => new Promise<void>(resolve => { finish = resolve }))
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
     const next = lease.runHumanInput('A', human.leaseEpoch, 4, 'next-with-gap', async () => { nextCalls++ })
     const nextRejected = expect(next).rejects.toThrow('control-disposed')
     let drained = false
@@ -119,5 +119,49 @@ describe('shared browser control lease', () => {
     finish(); await first; await nextRejected; await dispose
     expect(nextCalls).toBe(0); expect(drained).toBe(true)
     await expect(lease.runAgent('A', undefined, async () => {})).rejects.toThrow('control-disposed')
+  })
+  it('waits for human membership refresh before exactly-once ordered down/up/text input', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    const events: string[] = []
+    let finish!: () => void
+    const refresh = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => {
+      events.push('refresh'); finish = resolve
+    }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const down = lease.runHumanInput('A', human.leaseEpoch, 1, 'down', async () => { events.push('down'); lease.noteInput({ targetId: 'one', type: 'mousePressed' }, true) })
+    expect(lease.runHumanInput('A', human.leaseEpoch, 1, 'down', async () => { events.push('duplicate') })).toBe(down)
+    const up = lease.runHumanInput('A', human.leaseEpoch, 2, 'up', async () => { events.push('up'); lease.noteInput({ targetId: 'one', type: 'mouseReleased' }, true) })
+    const text = lease.runHumanInput('A', human.leaseEpoch, 3, 'text', async () => { events.push('text') })
+    const context = lease.runHuman('A', human.leaseEpoch, async () => { events.push('context') })
+    expect(() => lease.release('A', human.leaseEpoch)).toThrow('control-busy')
+    expect(() => lease.prepareContinuation('A', human.leaseEpoch)).toThrow('control-busy')
+    expect(events).toEqual(['refresh'])
+    finish(); await Promise.all([refresh, down, up, text, context])
+    // once() admits input on a microtask, but all input remains ordered and reads never overlap it.
+    expect(events[0]).toBe('refresh'); expect(events.filter(event => ['down', 'up', 'text'].includes(event))).toEqual(['down', 'up', 'text'])
+    expect(events).not.toContain('duplicate')
+    expect(lease.release('A', human.leaseEpoch).state).toBe('paused')
+  })
+  it('rechecks the exact lease after a refresh, refusing revoked queued input without dispatch', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    let finish!: () => void, dispatched = 0
+    const refresh = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const input = lease.runHumanInput('A', human.leaseEpoch, 1, 'queued-before-revoke', async () => { dispatched++ })
+    const refused = expect(input).rejects.toThrow('lease-not-owned')
+    lease.revoke('A'); finish(); await refresh; await refused
+    expect(dispatched).toBe(0); expect(lease.status('A').state).toBe('paused')
+  })
+  it('bounds queued human refreshes and drains them without dispatch after disposal', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A')
+    let finish!: () => void, dispatched = 0
+    const first = lease.runHuman('A', human.leaseEpoch, () => new Promise<void>(resolve => { finish = resolve }))
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const queue = Array.from({ length: 1023 }, () => lease.runHuman('A', human.leaseEpoch, async () => { dispatched++ }))
+    const settled = Promise.allSettled(queue)
+    await expect(lease.runHuman('A', human.leaseEpoch, async () => {})).rejects.toThrow('control-busy')
+    const disposal = lease.dispose(); finish(); await first; await disposal
+    expect((await settled).every(result => result.status === 'rejected')).toBe(true)
+    expect(dispatched).toBe(0)
   })
 })

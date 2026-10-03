@@ -89,7 +89,7 @@ export function applyRc2(ctx: ClientContext): void {
     const [frame, setFrame] = React.useState(undefined as string | undefined)
     const [size, setSize] = React.useState({ width: 0, height: 0 })
     const [url, setUrl] = React.useState('')
-    const [message, setMessage] = React.useState('本会话尚未打开 Agent 网页。')
+    const [message, setMessage] = React.useState('本会话 Agent 浏览器。')
     const [busy, setBusy] = React.useState(false)
     const [mode, setMode] = React.useState('queue' as 'queue' | 'steer')
     const keyboard = React.useRef(null as HTMLTextAreaElement | null)
