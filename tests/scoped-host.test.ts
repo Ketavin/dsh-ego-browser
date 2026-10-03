@@ -40,13 +40,13 @@ async function harness() {
     let raw = ''; for await (const chunk of req) raw += String(chunk)
     if (raw) workerBodies.push(JSON.parse(raw))
     const spaces = [{ targetId: 'target-A', title: 'A', url: 'https://a.example' }, { targetId: 'target-B', title: 'B-secret', url: 'https://b.example/secret' }]
-    const payload = req.url === '/api/spaces' ? { ok: true, spaces } : req.url === '/api/health' ? { workerOk: true, capture: { targetId: 'target-B' } } : { ok: true, targetId: 'target-A', state: 'watching' }
+    const payload = req.url === '/api/spaces' ? { ok: true, spaces } : req.url === '/api/health' ? { workerOk: true, pid: process.pid, bootId: 'in-process-fixture-worker', profileDir: env.EGO_LINUX_PROFILE, capture: { targetId: 'target-B' } } : { ok: true, targetId: 'target-A', state: 'watching' }
     res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload))
   })
   await new Promise<void>(resolve => worker.listen(0, '127.0.0.1', resolve))
   cleanup.push(() => new Promise<void>(resolve => worker.close(() => resolve())))
   mkdirSync(env.EGO_LINUX_STATE_DIR!, { recursive: true })
-  writeFileSync(join(env.EGO_LINUX_STATE_DIR!, 'ego-cast.json'), JSON.stringify({ port: (worker.address() as { port: number }).port, pid: process.pid }))
+  writeFileSync(join(env.EGO_LINUX_STATE_DIR!, 'ego-cast.json'), JSON.stringify({ port: (worker.address() as { port: number }).port, pid: process.pid, bootId: 'in-process-fixture-worker', profileDir: env.EGO_LINUX_PROFILE }))
   const ctx = { subprocess: { spawn: spawns }, get: (name: string) => name === 'webServer' ? {
     register: (o: { path: string; handler: (req: unknown, res: unknown) => unknown }) => { routes.set(o.path, o.handler); return () => routes.delete(o.path) },
   } : name === 'connection' ? { requestRejection: (req: IncomingMessage) => req.headers['x-fixture-trust'] === 'yes' ? undefined : 403 } : undefined,

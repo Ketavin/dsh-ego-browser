@@ -986,9 +986,9 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
           if (control.status('').state !== 'idle') return
           if (!shouldReapBrowser(Date.now(), last, cfg.idleTimeoutMin)) return
           if (last <= reapedFor) return // already reaped for this idle stretch
-          // Only reap when the state file says a browser is up. A stale
-          // browser.json makes --stop a harmless no-op, so no pid liveness
-          // check is needed here.
+          // Only attempt this isolated runtime. The CLI independently proves
+          // process/profile/endpoint ownership before any stop; stale or
+          // ambiguous state is refused instead of signalling a stored PID.
           const e = runtimeEnv
           const isWin = process.platform === 'win32'
           const home = e.HOME || e.USERPROFILE || (isWin ? e.LOCALAPPDATA || '' : homedir())

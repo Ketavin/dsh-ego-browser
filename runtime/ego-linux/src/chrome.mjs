@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import { BROWSER_STATE_FILE, PROFILE_DIR, STATE_DIR } from "./paths.mjs";
+import { scopedBrowserStateOwnership } from './process-identity.mjs';
 
 const BINARY_CANDIDATES = [
   process.env.EGO_LINUX_CHROME,
@@ -614,23 +615,28 @@ async function spawnAndAwait(binary, args, plan, lastError) {
     env: plan ? { ...process.env, DISPLAY: plan.display } : process.env,
   });
   child.unref();
+  const scoped = process.env.DSH_EGO_SCOPED_WORKER === '1';
+  const captured = { pid: child.pid, binary, profileDir: PROFILE_DIR };
+  const canSignal = async () => child.exitCode === null && child.signalCode === null
+    && (!scoped || await scopedBrowserStateOwnership(captured, PROFILE_DIR) === 'owned');
   try {
     const { port, wsUrl } = await waitForEndpoint(PROFILE_DIR);
+    if (scoped && await scopedBrowserStateOwnership(captured, PROFILE_DIR) !== 'owned') throw new Error('runtime-process-ownership-unverified');
     return { port, wsUrl, pid: child.pid };
   } catch (error) {
     lastError.error = error;
     // The endpoint never came up. Before the caller retries, make sure this
     // attempt's process is really gone: a half-dead Chrome would keep holding
     // the profile lock and block the next spawn.
-    if (child.exitCode === null) {
+    if (await canSignal()) {
       try {
-        process.kill(child.pid, "SIGTERM");
+        child.kill("SIGTERM");
       } catch {
         // already gone
       }
-      if (!(await waitForProcessExit(child.pid, 3000))) {
+      if (!(await waitForProcessExit(child.pid, 3000)) && await canSignal()) {
         try {
-          process.kill(child.pid, "SIGKILL");
+          child.kill("SIGKILL");
         } catch {
           // already gone
         }
@@ -644,7 +650,7 @@ async function launch({ headless }) {
   const binary = await resolveBinary();
   await mkdir(PROFILE_DIR, { recursive: true });
   // Ours now exists, so it cannot be mistaken for an orphan below.
-  await reapOrphanedBrowsers();
+  if (process.env.DSH_EGO_SCOPED_WORKER !== '1') await reapOrphanedBrowsers();
 
   const args = [
     ...LAUNCH_FLAGS,
@@ -752,7 +758,13 @@ export async function ensureBrowser({ headless = false } = {}) {
 
   const state = await readBrowserState();
   if (state?.port) {
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1') {
+      const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
+      if (ownership === 'absent') return launch({ headless });
+      if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
+    }
     const wsUrl = await probe(state.port);
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1' && wsUrl && wsUrl !== state.wsUrl) throw new Error('runtime-endpoint-ownership-unverified');
     if (wsUrl) return { port: state.port, wsUrl, launched: false };
   }
   return launch({ headless });
@@ -766,9 +778,10 @@ export async function ensureBrowser({ headless = false } = {}) {
  * down correctly — Restore pages?". Browser.close is the graceful path, so the
  * profile records a clean exit and there is nothing left to restore.
  */
-async function closeBrowserGracefully(port, timeoutMs = 5000) {
+async function closeBrowserGracefully(port, timeoutMs = 5000, expectedState = null) {
   const wsUrl = await probe(port);
   if (!wsUrl) return false;
+  if (expectedState && wsUrl !== expectedState.wsUrl) return false;
 
   return new Promise((resolve) => {
     let socket = null;
@@ -793,7 +806,9 @@ async function closeBrowserGracefully(port, timeoutMs = 5000) {
       finish(false);
       return;
     }
-    socket.onopen = () => {
+    socket.onopen = async () => {
+      if (expectedState && await scopedBrowserStateOwnership(expectedState, PROFILE_DIR) !== 'owned') { finish(false); return; }
+      if (settled) return;
       sent = true;
       socket.send(JSON.stringify({ id: 1, method: "Browser.close" }));
     };
@@ -825,7 +840,15 @@ export async function stopBrowser() {
   const state = await readBrowserState();
   let stopped = false;
 
-  if (state?.port) stopped = await closeBrowserGracefully(state.port);
+  if (state && process.env.DSH_EGO_SCOPED_WORKER === '1') {
+    const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
+    if (ownership === 'absent') { await rm(BROWSER_STATE_FILE, { force: true }); return false; }
+    if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
+    const wsUrl = state.port ? await probe(state.port) : null;
+    if (wsUrl && wsUrl !== state.wsUrl) throw new Error('runtime-endpoint-ownership-unverified');
+  }
+
+  if (state?.port) stopped = await closeBrowserGracefully(state.port, 5000, process.env.DSH_EGO_SCOPED_WORKER === '1' ? state : null);
   // Answering the request is not the same as acting on it. A browser that
   // stayed up has to be signalled anyway — otherwise --stop removes the state
   // file that is the only handle on it and leaves it running, unreachable.
@@ -833,6 +856,11 @@ export async function stopBrowser() {
 
   // The blunt instrument, only when the browser did not take the polite request.
   if (!stopped && state?.pid) {
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1') {
+      const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
+      if (ownership === 'absent') { await rm(BROWSER_STATE_FILE, { force: true }); return false; }
+      if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
+    }
     try {
       process.kill(state.pid, "SIGTERM");
       stopped = true;
@@ -843,7 +871,7 @@ export async function stopBrowser() {
 
   // An X server we started for a display-less machine is dead weight once the
   // browser is gone; a user display (reused, not launched by us) stays up.
-  if (state?.xvfb?.pid) {
+  if (state?.xvfb?.pid && process.env.DSH_EGO_SCOPED_WORKER !== '1') {
     try {
       process.kill(state.xvfb.pid, "SIGTERM");
     } catch {
@@ -862,6 +890,8 @@ export async function stopBrowser() {
 export async function browserStatus() {
   const state = await readBrowserState();
   if (!state?.port) return { running: false };
+  if (process.env.DSH_EGO_SCOPED_WORKER === '1' && await scopedBrowserStateOwnership(state, PROFILE_DIR) !== 'owned') return { running: false, code: 'runtime-state-ownership-unverified' };
   const wsUrl = await probe(state.port);
+  if (process.env.DSH_EGO_SCOPED_WORKER === '1' && wsUrl !== state.wsUrl) return { running: false, code: 'runtime-endpoint-ownership-unverified' };
   return wsUrl ? { running: true, ...state, wsUrl } : { running: false, ...state };
 }

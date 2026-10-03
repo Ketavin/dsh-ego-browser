@@ -375,16 +375,20 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 8192): Promise<Reco
 interface WorkerState {
   port: number | null
   pid: number | null
+  bootId?: string
+  profileDir?: string
 }
 
 /** Read the worker's { port, pid } from ego-cast.json, if any. */
 async function knownWorkerState(env?: NodeJS.ProcessEnv): Promise<WorkerState> {
   try {
     const { readFile } = await import('node:fs/promises')
-    const state = JSON.parse(await readFile(castStatePath(env), 'utf8')) as { port?: unknown; pid?: unknown }
+    const state = JSON.parse(await readFile(castStatePath(env), 'utf8')) as { port?: unknown; pid?: unknown; bootId?: unknown; profileDir?: unknown }
     return {
       port: typeof state.port === 'number' ? state.port : null,
       pid: typeof state.pid === 'number' ? state.pid : null,
+      bootId: typeof state.bootId === 'string' ? state.bootId : undefined,
+      profileDir: typeof state.profileDir === 'string' ? state.profileDir : undefined,
     }
   } catch {
     return { port: null, pid: null }
@@ -411,18 +415,27 @@ export const FRAME_RELAY_DISABLED = 'frame relay disabled'
  * screencast / WGC capture and the ffmpeg pull, so killing it is what actually
  * turns the frame relay off when the setting is flipped while it is running —
  * no HTTP shutdown route exists in bin/ego-cast-worker.mjs (it exits on
- * SIGTERM/SIGINT). A stale ego-cast.json is harmless: ensureWorker() proves the
- * pid is alive before trusting the recorded port.
+ * SIGTERM/SIGINT). A recorded PID is insufficient: the private worker must
+ * answer with the exact stored boot ID/PID/profile before it can be stopped.
  */
 export async function stopCastWorker(env?: NodeJS.ProcessEnv): Promise<boolean> {
   const state = await knownWorkerState(env)
-  if (state.pid === null || !isProcessAlive(state.pid)) return false
+  if (state.pid === null || state.pid === process.pid || !isProcessAlive(state.pid)) return false
+  if (!await workerIdentity(state, env)) return false
   try {
     process.kill(state.pid, 'SIGTERM')
     return true
   } catch {
     return false
   }
+}
+
+/** Bind the recorded PID/port to this exact worker boot and runtime profile. */
+async function workerIdentity(state: WorkerState, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  if (!state.port || !state.bootId || state.bootId.length < 16 || state.profileDir === undefined) return false
+  if (env?.DSH_EGO_SCOPED_WORKER === '1' && state.profileDir !== env.EGO_LINUX_PROFILE) return false
+  const health = await proxyFrom(state.port, '/api/health') as Record<string, unknown> | null
+  return health?.workerOk === true && health.pid === state.pid && health.bootId === state.bootId && health.profileDir === state.profileDir
 }
 
 interface CaptureConfigPayload {
@@ -476,8 +489,7 @@ function makeEnsureWorker(ctx: EgoContext, cfg: ResolvedConfig, ffmpegManager: F
   async function launchedWorkerPort(): Promise<number | null> {
     const state = await knownWorkerState(env)
     if (state.pid === null || !isProcessAlive(state.pid)) return null
-    const alive = await proxyFrom(state.port!, '/api/health')
-    return alive ? state.port : null
+    return await workerIdentity(state, env) ? state.port : null
   }
   return async function ensureWorker(): Promise<number | null> {
     if (!env) return null

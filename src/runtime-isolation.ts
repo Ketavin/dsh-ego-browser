@@ -14,8 +14,16 @@ export function isolatedRuntimeEnv(base: NodeJS.ProcessEnv = process.env): NodeJ
       if (rel.startsWith('..') || isAbsolute(rel)) throw new ScopeError('runtime-path-outside-home')
     }
   }
+  // Core scrubs ambient credentials, but explicitly supplied env merges after
+  // that scrub. Do not reintroduce credential-shaped names or harness identity.
+  const inherited: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(base)) {
+    inherited[key] = /KEY|PASSWORD|SECRET|TOKEN/i.test(key) || key.toUpperCase().startsWith('DSH_') ? undefined : value
+  }
   return {
-    ...base,
+    ...inherited,
+    DSH_HOME: home,
+    DSH_EGO_ISOLATED_RUNTIME: '1',
     LOCALAPPDATA: join(root, 'local'),
     XDG_STATE_HOME: join(root, 'local'),
     XDG_DATA_HOME: join(root, 'data'),

@@ -27,4 +27,13 @@ describe('dedicated host and worker runtime paths', () => {
     const source = readFileSync(new URL('../src/worker/ego-cast-worker.ts', import.meta.url), 'utf8')
     expect(source).toContain("if (process.env.DSH_EGO_SCOPED_WORKER !== '1') stopSiblingWorkers()")
   })
+  it('does not explicitly reintroduce credential-shaped env or unrelated harness identity after Core scrubbing', () => {
+    const home = mkdtempSync(join(tmpdir(), 'ego-isolation-')); dirs.push(home)
+    const env = isolatedRuntimeEnv({ DSH_EGO_ISOLATED_RUNTIME: '1', DSH_HOME: home, fixture_token: 'fixture', FIXTURE_API_KEY: 'fixture',
+      DSH_SESSION_ID: 'unrelated', DSH_SHELL_ID: 'unrelated', PATH: 'platform-path', LANG: 'fixture-locale' })!
+    expect(env.fixture_token).toBeUndefined(); expect(env.FIXTURE_API_KEY).toBeUndefined()
+    expect(env.DSH_SESSION_ID).toBeUndefined(); expect(env.DSH_SHELL_ID).toBeUndefined()
+    expect(env.PATH).toBe('platform-path'); expect(env.LANG).toBe('fixture-locale')
+    expect(env.DSH_HOME).toBe(home); expect(env.DSH_EGO_SCOPED_WORKER).toBe('1')
+  })
 })

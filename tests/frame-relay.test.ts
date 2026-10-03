@@ -46,7 +46,7 @@ function stateFilePath(): string {
 }
 
 function writeWorkerState(port: number, pid: number): void {
-  writeFileSync(stateFilePath(), JSON.stringify({ port, pid }), "utf8");
+  writeFileSync(stateFilePath(), JSON.stringify({ port, pid, bootId: 'fixture-worker-boot-' + pid, profileDir: '' }), "utf8");
 }
 
 interface FakeWorker { proc: ChildProcess; pid: number; port: number }
@@ -181,7 +181,7 @@ function mount(
   const binding = scopes.bind('A'); scopes.record('A', { name: binding.name, targets: ['tab-1'] });
   void control.takeOver('A');
   initCastServer(ctx as never, live as never, bridge as never, null, opts.openAgentWindow as never, opts.loginImport as never, {
-    scopes, control, runtimeEnv: { ...process.env, EGO_LINUX_STATE_DIR: CAST_DIR, DSH_EGO_SCOPED_WORKER: '1' },
+    scopes, control, runtimeEnv: { ...process.env, EGO_LINUX_STATE_DIR: CAST_DIR, EGO_LINUX_PROFILE: '', DSH_EGO_SCOPED_WORKER: '1' },
     validateSession: id => { if (id !== 'A') throw new Error('unknown fixture session'); return id; },
     navigate: async () => { throw new Error('not used'); }, context: async () => { throw new Error('not used'); },
   });
@@ -338,6 +338,19 @@ describe("frame relay enabled", () => {
 });
 
 describe("stopCastWorker", () => {
+  it('refuses stale boot/PID/profile state without terminating either live fixture', async () => {
+    const first = await startFakeWorker(), second = await startFakeWorker();
+    try {
+      writeFileSync(stateFilePath(), JSON.stringify({ port: first.port, pid: first.pid, bootId: 'wrong-worker-boot-id', profileDir: '' }));
+      expect(await stopCastWorker()).toBe(false);
+      writeFileSync(stateFilePath(), JSON.stringify({ port: first.port, pid: second.pid, bootId: 'fixture-worker-boot-' + first.pid, profileDir: '' }));
+      expect(await stopCastWorker()).toBe(false);
+      writeWorkerState(first.port, first.pid);
+      expect(await stopCastWorker({ ...process.env, DSH_EGO_SCOPED_WORKER: '1', EGO_LINUX_PROFILE: 'different-runtime' })).toBe(false);
+      expect(first.proc.exitCode).toBeNull(); expect(first.proc.signalCode).toBeNull();
+      expect(second.proc.exitCode).toBeNull(); expect(second.proc.signalCode).toBeNull();
+    } finally { killQuietly(first); killQuietly(second); rmSync(stateFilePath(), { force: true }); }
+  });
   it("SIGTERMs a live worker recorded in ego-cast.json and reports false when none is live", async () => {
     const worker = await startFakeWorker();
     writeWorkerState(worker.port, worker.pid);

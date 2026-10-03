@@ -1,6 +1,6 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-rc2.1`. Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-rc2.2`. Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -24,6 +24,13 @@ state, cache, worker and Chrome profile paths stay under
 against that home. Inherited external CDP and extra Chrome arguments are
 cleared. No daily Chrome, ResearchHub runtime or existing account is imported.
 Only CDP JPEG capture is enabled in this candidate.
+Explicit subprocess environment removes credential-shaped names
+(`KEY|PASSWORD|SECRET|TOKEN`, case-insensitive) and unrelated `DSH_*` entries
+before reintroducing the narrow isolation controls. This name heuristic is the
+reviewed Core policy, not proof that every possible credential-bearing value
+can be identified. Stored PID liveness alone is insufficient: browser reuse,
+status and termination check the actual process executable/profile and stored
+WebSocket identity; workers match the exact boot ID/PID/profile health receipt.
 
 Every public cast route and gateway settings prefix uses the actual Core
 `connection.requestRejection`. This checks local socket, Host, Origin and
@@ -95,17 +102,23 @@ the exact built entry and package hashes. Isolated evidence includes:
   for A/B space ownership, real CDP frames, private worker browser-origin
   rejection, human input/lease release, local opener/302 callback/owned popup
   close and verified owned process cleanup.
+- Actual compiled Core LocalSubprocessRuntime with untouched native internals:
+  seven checks for public Session identities, real CLI/tool/worker handles,
+  child environment scrub, navigation/frame/input fences and final owned process disposal.
+- Dedicated runtime cold restart and stale state: five checks for unrelated
+  live-PID and foreign endpoint refusal, fresh targets/no URL adoption, local
+  fixture cookie/storage persistence and exact captured process cleanup.
 - Real React source lifecycle fixtures exercise A/B remount, late takeover
   release, held-input drain and host-generation replacement.
 
-The browser probe uses a native subprocess adapter seam rather than the formal
-Core subprocess service. The RPC probe uses the actual in-process JSON carrier,
+The original browser probe uses a native adapter; a separate final probe loads
+the actual compiled Core subprocess service. The RPC probe uses the in-process JSON carrier,
 not the complete SessionRuntime projection or web socket transport. No external
 LLM, actual login or production service is touched.
 
 Still required before joint release: loaded final bundles in the combined
-Sidebar/Profile, real formal subprocess integration, P1–P6 joint regression,
-restart/persistence and stale PID/state reuse. Actual provider OAuth and account
+Sidebar/Profile and P1–P6 joint regression. Real account login persistence,
+crash recovery and arbitrary stale-state recovery are not certified. Provider OAuth and account
 login are not accepted: only a local OAuth-style popup/opener/redirect fixture
 has passed. Platform variants, shared daily-browser runtime, FFmpeg and native
 window handoff are not certified capabilities of this candidate.

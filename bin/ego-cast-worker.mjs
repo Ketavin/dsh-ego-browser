@@ -3,9 +3,10 @@ import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { constants, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { access } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, readFile, realpath } from "node:fs/promises";
 import { promisify } from "node:util";
 
 //#region rolldown:runtime
@@ -3674,13 +3675,13 @@ var CdpClient = class {
 			params
 		};
 		if (sessionId) payload.sessionId = sessionId;
-		return new Promise((resolve, reject) => {
+		return new Promise((resolve$1, reject) => {
 			const timer = setTimeout(() => {
 				this.pending.delete(id);
 				reject(/* @__PURE__ */ new Error(`CDP ${method} timed out after ${timeoutMs}ms`));
 			}, timeoutMs);
 			this.pending.set(id, {
-				resolve,
+				resolve: resolve$1,
 				reject,
 				timer
 			});
@@ -4651,7 +4652,7 @@ async function resolveCaptureSource({ sessions, targetId, browserPid, platform: 
 //#region src/worker/capture-ffmpeg.ts
 const defaultSpawn = spawn;
 function runProbe(path, argv, spawn$1, timeoutMs, captureOutput = false) {
-	return new Promise((resolve) => {
+	return new Promise((resolve$1) => {
 		let child;
 		let output = "";
 		let settled = false;
@@ -4659,7 +4660,7 @@ function runProbe(path, argv, spawn$1, timeoutMs, captureOutput = false) {
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			resolve({
+			resolve$1({
 				ok,
 				output
 			});
@@ -4675,7 +4676,7 @@ function runProbe(path, argv, spawn$1, timeoutMs, captureOutput = false) {
 				] : "ignore"
 			});
 		} catch {
-			resolve({
+			resolve$1({
 				ok: false,
 				output
 			});
@@ -4951,7 +4952,7 @@ var FfmpegCaptureBackend = class {
 				message: this.stderr.toString("utf8") || `FFmpeg exited unexpectedly (${code ?? signal})`
 			});
 		});
-		await new Promise((resolve, reject) => {
+		await new Promise((resolve$1, reject) => {
 			const finish = (callback, value) => {
 				clearTimeout(timer);
 				clearInterval(check);
@@ -4959,7 +4960,7 @@ var FfmpegCaptureBackend = class {
 			};
 			const timer = setTimeout(() => finish(reject, /* @__PURE__ */ new Error("FFmpeg did not produce an MP4 init segment within 8 seconds")), 8e3);
 			const check = setInterval(() => {
-				if (initialized) finish(resolve, void 0);
+				if (initialized) finish(resolve$1, void 0);
 				else if (this.child !== child) finish(reject, /* @__PURE__ */ new Error("FFmpeg exited before the MP4 init segment"));
 			}, 20);
 		}).catch(async (error) => {
@@ -4982,18 +4983,18 @@ var FfmpegCaptureBackend = class {
 			try {
 				child.stdin?.write("q\n");
 			} catch {}
-			await Promise.race([new Promise((resolve) => child.once("exit", () => resolve())), new Promise((resolve) => setTimeout(() => resolve(), 1500))]);
+			await Promise.race([new Promise((resolve$1) => child.once("exit", () => resolve$1())), new Promise((resolve$1) => setTimeout(() => resolve$1(), 1500))]);
 			if (child.exitCode === null) {
 				try {
 					child.kill("SIGTERM");
 				} catch {}
-				await Promise.race([new Promise((resolve) => child.once("exit", () => resolve())), new Promise((resolve) => setTimeout(() => resolve(), 1e3))]);
+				await Promise.race([new Promise((resolve$1) => child.once("exit", () => resolve$1())), new Promise((resolve$1) => setTimeout(() => resolve$1(), 1e3))]);
 			}
 			if (child.exitCode === null) {
 				try {
 					child.kill("SIGKILL");
 				} catch {}
-				await new Promise((resolve) => child.once("exit", () => resolve()));
+				await new Promise((resolve$1) => child.once("exit", () => resolve$1()));
 			}
 			this.stopping = null;
 			this.onVideoEnd({
@@ -5054,6 +5055,48 @@ function shouldProbePage(scoped) {
 }
 
 //#endregion
+//#region runtime/ego-linux/src/process-identity.mjs
+const execute = promisify(execFile);
+const normalized = (value) => process.platform === "win32" ? resolve(value).toLowerCase() : resolve(value);
+/** PID liveness alone cannot authorize reuse or termination of a stored process. */
+async function scopedBrowserStateOwnership(state, profile) {
+	if (!state || !Number.isSafeInteger(state.pid) || state.pid <= 0 || state.pid === process.pid || typeof state.profileDir !== "string" || typeof state.binary !== "string" || typeof profile !== "string") return "unowned";
+	if (normalized(state.profileDir) !== normalized(profile)) return "unowned";
+	try {
+		process.kill(state.pid, 0);
+	} catch (error) {
+		return error?.code === "ESRCH" ? "absent" : "unknown";
+	}
+	try {
+		if (normalized(await realpath(state.profileDir)) !== normalized(await realpath(profile))) return "unowned";
+		if (process.platform === "win32") return (await execute("powershell.exe", [
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			"$p=Get-CimInstance Win32_Process -Filter (\"ProcessId=\"+$env:DSH_EGO_OWNER_PID); $flag='(?i)(?:^|\\s)\"?--user-data-dir=(?:\"'+[regex]::Escape($env:DSH_EGO_OWNER_PROFILE)+'\"|'+[regex]::Escape($env:DSH_EGO_OWNER_PROFILE)+')\"?(?:\\s|$)'; if($p -and $p.ExecutablePath -eq $env:DSH_EGO_OWNER_BINARY -and $p.CommandLine -match $flag){\"owned\"}else{\"unowned\"}"
+		], {
+			env: {
+				...process.env,
+				DSH_EGO_OWNER_PID: String(state.pid),
+				DSH_EGO_OWNER_PROFILE: profile,
+				DSH_EGO_OWNER_BINARY: resolve(state.binary)
+			},
+			windowsHide: true,
+			timeout: 5e3,
+			maxBuffer: 1024
+		})).stdout.trim() === "owned" ? "owned" : "unowned";
+		if (process.platform === "linux") {
+			const args = (await readFile(`/proc/${state.pid}/cmdline`, "utf8")).split("\0");
+			return normalized(await realpath(`/proc/${state.pid}/exe`)) === normalized(await realpath(state.binary)) && args.includes(`--user-data-dir=${profile}`) ? "owned" : "unowned";
+		}
+		return "unknown";
+	} catch {
+		return "unknown";
+	}
+}
+
+//#endregion
 //#region src/worker/ego-cast-worker.ts
 const SENTINEL = "@@DSH_RESULT@@";
 const HOME = homedir() || process.env.HOME || process.env.USERPROFILE || "/root";
@@ -5062,6 +5105,7 @@ const STATE_HOME = IS_WIN ? process.env.LOCALAPPDATA || join(HOME, "AppData", "L
 const STATE_DIR = process.env.EGO_LINUX_STATE_DIR || join(STATE_HOME, "ego-lite-linux");
 const BROWSER_STATE_FILE = join(STATE_DIR, "browser.json");
 const CAST_STATE_FILE = join(STATE_DIR, "ego-cast.json");
+const bootId = randomUUID();
 let castConfig = {
 	captureBackend: "auto",
 	streamProfile: "balanced",
@@ -5301,9 +5345,11 @@ async function resolveBrowser() {
 	};
 	const state = await readBrowserState();
 	if (!state?.port) return null;
+	if (process.env.DSH_EGO_SCOPED_WORKER === "1" && await scopedBrowserStateOwnership(state, process.env.EGO_LINUX_PROFILE) !== "owned") return null;
 	try {
 		const response = await fetch(`http://127.0.0.1:${state.port}/json/version`, { signal: AbortSignal.timeout(1500) });
 		const wsUrl = response.ok ? (await response.json()).webSocketDebuggerUrl : null;
+		if (process.env.DSH_EGO_SCOPED_WORKER === "1" && wsUrl !== state.wsUrl) return null;
 		return wsUrl ? {
 			port: state.port ?? null,
 			wsUrl
@@ -5367,8 +5413,8 @@ async function connectLoop() {
 		}
 		try {
 			const ws = new import_websocket.default(browser.wsUrl);
-			await new Promise((resolve, reject) => {
-				ws.addEventListener("open", () => resolve(), { once: true });
+			await new Promise((resolve$1, reject) => {
+				ws.addEventListener("open", () => resolve$1(), { once: true });
 				ws.addEventListener("error", () => reject(/* @__PURE__ */ new Error("ws error")), { once: true });
 			});
 			const cdp = new CdpClient(ws);
@@ -5381,9 +5427,9 @@ async function connectLoop() {
 			};
 			publishStatus({ browserConnected: true });
 			await manager.browserConnected();
-			await new Promise((resolve) => {
-				ws.addEventListener("close", () => resolve(), { once: true });
-				ws.addEventListener("error", () => resolve(), { once: true });
+			await new Promise((resolve$1) => {
+				ws.addEventListener("close", () => resolve$1(), { once: true });
+				ws.addEventListener("error", () => resolve$1(), { once: true });
 			});
 			await manager.browserDisconnected();
 			await sessions.dispose();
@@ -5401,7 +5447,7 @@ async function connectLoop() {
 	}
 }
 function sleep(ms) {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+	return new Promise((resolve$1) => setTimeout(resolve$1, ms));
 }
 function stopSiblingWorkers() {
 	const self = process.pid;
@@ -5480,6 +5526,9 @@ async function main() {
 		try {
 			if (req.method === "GET" && url.pathname === "/api/health") return sendJson(res, 200, {
 				workerOk: true,
+				pid: process.pid,
+				bootId,
+				profileDir: process.env.EGO_LINUX_PROFILE || "",
 				browserConnected: !!active,
 				capture: manager.status()
 			});
@@ -5632,12 +5681,14 @@ async function main() {
 			});
 		}
 	});
-	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	await new Promise((resolve$1) => server.listen(0, "127.0.0.1", resolve$1));
 	const port = server.address().port;
 	mkdirSync(STATE_DIR, { recursive: true });
 	writeFileSync(CAST_STATE_FILE, JSON.stringify({
 		port,
-		pid: process.pid
+		pid: process.pid,
+		bootId,
+		profileDir: process.env.EGO_LINUX_PROFILE || ""
 	}, null, 2));
 	const metadataTimer = setInterval(() => {
 		if (!active || sseClients.size === 0) return;
