@@ -1,6 +1,6 @@
 {
   "name": "dsh-ego-browser",
-  "version": "0.8.6-dsh-rc2.4",
+  "version": "0.8.6-dsh-rc2.5",
   "description": "Isolated adaptation of upstream Ego Browser v0.8.6 for the reviewed DSH rc.2 fork: 25 scoped tools, Better Sidebar Browser mode, explicit human control and main Conversation continuation gate. Production Profile and OAuth acceptance remain separate gates.",
   "type": "module",
   "main": "./lib/index.js",

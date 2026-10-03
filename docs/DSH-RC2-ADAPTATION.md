@@ -1,6 +1,6 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-rc2.4`. Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-rc2.5`. Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -148,3 +148,10 @@ continuation gate wraps its original synchronous public maintenance claim
 after the drain, preserving durable marker admission before arming. rc2.3 UI
 proved two clicks and Chinese inputs, but its continue could still collide with
 an ongoing refresh. The final installed UI must now be rerun against rc2.4.
+
+The rc2.5 follow-up only styles the rc.2 watch view using the actual DSW font,
+label/background/border/interaction tokens. Controls use 14px type, themed
+hover/focus/disabled states and wrapping layout; status and the scoped-browser
+notice remain readable in dark and narrow panels. Frame coordinates, control,
+transport and host bytes are unchanged. Final installed light/dark and narrow
+UI checks are recorded separately from the retained rc2.4 functional pass.

@@ -1,6 +1,6 @@
 # ego-browser — 看得见的 Agent 浏览器
 
-> **本地隔离适配候选 `0.8.6-dsh-rc2.4`**：仅评估本机 reviewed Core
+> **本地隔离适配候选 `0.8.6-dsh-rc2.5`**：仅评估本机 reviewed Core
 > `0.1.1-rc.2` fork 和带 `browserUrl` 接口的 Better Sidebar 候选。
 > 当前入口、工具、安全与验收边界以 [DSH-RC2-ADAPTATION.md](docs/DSH-RC2-ADAPTATION.md)
 > 为准：25 个 session-scoped 工具、单 Browser 入口内 Agent 模式、公共主对话继续门、独立 Chrome 数据路径。

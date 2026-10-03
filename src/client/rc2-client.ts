@@ -314,7 +314,23 @@ export function applyRc2(ctx: ClientContext): void {
     if (!sidebar || !sidebar.features?.includes('browserUrl')) return
     sidebarCtx.effect(() => {
       const style = document.createElement('style')
-      style.textContent = '.dsh-ego-rc2{height:100%;min-height:0;display:flex;flex-direction:column;gap:8px;padding:8px;box-sizing:border-box;font:12px system-ui;color:var(--dsw-alias-text-primary,currentColor)}.dsh-ego-rc2 form,.dsh-ego-rc2-controls,.dsh-ego-rc2-targets{display:flex;gap:6px;flex-wrap:wrap}.dsh-ego-rc2 form input{flex:1;min-width:120px}.dsh-ego-rc2-view{flex:1;min-height:80px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.05)}.dsh-ego-rc2-view img{width:100%;height:100%;object-fit:contain;touch-action:none}.dsh-ego-rc2-keyboard{height:28px;resize:none}.dsh-ego-rc2 small{opacity:.7}.dsh-ego-rc2 button,.dsh-ego-rc2 input,.dsh-ego-rc2 select,.dsh-ego-rc2 textarea{font:inherit}'
+      style.textContent = `
+        .dsh-ego-rc2{height:100%;min-height:0;min-width:0;display:flex;flex-direction:column;gap:8px;padding:12px;box-sizing:border-box;overflow:auto;font:var(--dsw-font-s-14,14px/22px system-ui);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
+        .dsh-ego-rc2 form,.dsh-ego-rc2-controls,.dsh-ego-rc2-targets{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex-shrink:0;min-width:0;max-width:100%}
+        .dsh-ego-rc2 button,.dsh-ego-rc2 input,.dsh-ego-rc2 select,.dsh-ego-rc2 textarea{box-sizing:border-box;font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:8px;padding:5px 9px;min-width:0;max-width:100%}
+        .dsh-ego-rc2 button{cursor:pointer;white-space:normal;overflow-wrap:anywhere;text-align:start}
+        .dsh-ego-rc2 button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover-solid)}
+        .dsh-ego-rc2 button:not(:disabled):active,.dsh-ego-rc2 button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-active);border-color:var(--dsw-alias-state-business-primary)}
+        .dsh-ego-rc2 :is(button,input,select,textarea):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
+        .dsh-ego-rc2 :is(button,input,select,textarea):disabled{cursor:not-allowed;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform)}
+        .dsh-ego-rc2 input::placeholder,.dsh-ego-rc2 textarea::placeholder{color:var(--dsw-alias-label-tertiary)}
+        .dsh-ego-rc2 form input{flex:1 1 200px}
+        .dsh-ego-rc2 [role=status]{flex-shrink:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary)}
+        .dsh-ego-rc2-view{flex:1;min-height:80px;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-module-platform);border-radius:8px}
+        .dsh-ego-rc2-view img{width:100%;height:100%;object-fit:contain;touch-action:none}
+        .dsh-ego-rc2-keyboard{min-height:36px;flex-shrink:0;resize:none;width:100%}
+        .dsh-ego-rc2 small{flex-shrink:0;font:var(--dsw-font-s-12,12px/18px system-ui);color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+      `
       document.head.appendChild(style)
       const dispose = sidebar.registerTab({
         id: 'ego-browser:watch', title: 'Agent Browser', order: 70, single: true,
