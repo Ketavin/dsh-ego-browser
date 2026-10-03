@@ -811,7 +811,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   // forever, zero errors). The official optional-service pattern is a nested
   // inject: the callback runs only once the service is available, and no-ops
   // on hosts without a web server (TUI / headless stay tools-only).
-  ctx.inject?.(['webServer'], (wctx) => {
+  ctx.inject?.(['webServer', 'connection'], (wctx) => {
     try {
       initCastServer(
         wctx as EgoContext,

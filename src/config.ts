@@ -1,10 +1,6 @@
-// [DSH 0.1.7] Schemastery MUST come from DSH's own fork rather than the public
-// package: only that build WRAPS a `meta.volatile` field in a cosmokit
-// `Volatile` reference when it parses the config, and the Loader's live-commit
-// path (`volatileEntries` / `updateVolatile`) walks those references. With the
-// public build the write reports success but has nothing to commit — and with
-// NO volatile field at all the host refuses the edit outright with
-// `Plugin entry "ego-browser" has no volatile fields`.
+// The rc.2 adaptation uses its registered settings namespace and watch API.
+// Its Schemastery/Loader has no volatile-field contract. Keep the entry schema
+// plain; live updates arrive through installEgoBrowserSettings instead.
 import z from '@deepseek-ai/schemastery'
 import type { RawConfig, ResolvedConfig } from './types.ts'
 
@@ -15,10 +11,7 @@ const encoder = z.union([
   'h264_videotoolbox', 'h264_vaapi',
 ])
 
-// User preferences. Every field here is marked `.volatile()` below: the Loader
-// ignores volatile fields when deciding whether an edit needs a remount, takes
-// the live-commit path instead, and the settings form can then write them
-// without restarting the plugin.
+// User preferences registered with the rc.2 settings service.
 const prefs = {
   isolateSpaces: z.boolean().description('Space isolation: false = persistent profile (keep logins across restarts); true = isolated sandbox.'),
   idleTimeoutMin: z.number().min(0).max(1440).step(1).description('Auto-stop the backing browser after N minutes without an ego_* call (0 = off). Relaunches on demand at the next call.'),
@@ -42,19 +35,10 @@ const prefs = {
   chromeArgs: z.string().description('Extra args appended to the Chrome launch argv. Takes effect on the next browser cold start (the browser is a singleton).'),
 }
 
-// `.volatile()` RETURNS A COPY (like `extra()`), so the marked schemas must be
-// collected — calling it for its side effect leaves every field non-volatile
-// and the settings service then reports "no volatile fields" for the entry.
-const volatilePrefs = Object.fromEntries(
-  // The fork's public typings do not declare `volatile()`, but the runtime has
-  // it (DSH's own plugins rely on it) — hence the unknown-cast.
-  Object.entries(prefs).map(([key, field]) => [key, (field as unknown as { volatile(): unknown }).volatile()]),
-)
-
 // Defaults live in resolveConfig so a persisted legacy value is not hidden by
 // a schema default before the one-release migration runs.
 export const Config = z.object({
-  ...volatilePrefs,
+  ...prefs,
   // Deprecated read-compatible keys. The settings UI only writes canonical keys.
   castFpsCap: z.number().min(0).max(60).step(1),
   screencastQuality: z.number().min(1).max(100).step(1),

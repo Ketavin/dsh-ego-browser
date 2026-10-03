@@ -122,7 +122,7 @@ function makeReq(path: string, method = "GET") {
   return {
     method,
     url: path,
-    headers: { cookie: "dsh-auth-test=1", host: "127.0.0.1:3080" },
+    headers: { host: "127.0.0.1:3080", "content-type": "application/json" },
     async *[Symbol.asyncIterator]() { /* empty body */ },
   };
 }
@@ -157,7 +157,9 @@ function mount(
     },
   };
   const ctx = {
-    get: (name: string) => (name === "webServer" ? server : undefined),
+    get: (name: string) => name === "webServer" ? server : name === "connection" ? {
+      requestRejection: (req: { headers: Record<string, string> }) => req.headers.host ? undefined : 403,
+    } : undefined,
     effect: (fn: () => unknown) => fn(),
     subprocess: {
       // A spawn while the relay is OFF is a contract violation — fail loudly.
@@ -249,10 +251,10 @@ describe("frame relay disabled", () => {
     expect(typeof body.toolCallCount).toBe("number");
   });
 
-  it("still enforces the trust fence (no cookie → 401, not a refusal)", async () => {
+  it("still delegates to the Host fence before the relay refusal", async () => {
     const h = mount(resolveConfig({ disableFrameRelay: true }));
     const res = await h.invoke("/api/ego/spaces", { method: "GET", url: "/api/ego/spaces", headers: {}, async *[Symbol.asyncIterator]() {} });
-    expect(res.statusCode).toBe(401);
+    expect(res.statusCode).toBe(403);
   });
 
   it("leaves the non-relay routes working (raise / login-import are not frame paths)", async () => {

@@ -22,6 +22,7 @@ import { rewriteGithubUrl } from './ffmpeg-manifest.ts'
 import type { EgoContext, SettingsService, WebServerLike } from './types.ts'
 import type { FfmpegInstallationManager, FfmpegStatus } from './ffmpeg-installation.ts'
 import type { RawConfig, ResolvedConfig } from './types.ts'
+import { isTrustedDesktopRequest } from './request-trust.ts'
 
 export interface SettingsBridge {
   source(): Record<string, unknown>
@@ -86,25 +87,15 @@ export function registerEgoBrowserGateway(
       handler: async (reqRaw: unknown, resRaw: unknown) => {
         const req = reqRaw as IncomingMessage
         const res = resRaw as ServerResponse
+        if (!isTrustedDesktopRequest(ctx, req)) {
+          writeJson(res, 403, envelopeError('forbidden', 'Host desktop request required'))
+          return
+        }
         if (req.method !== 'POST') {
           writeJson(res, 405, envelopeError('method-not-allowed', 'POST only'))
           return
         }
-        const origin = req.headers.origin
-        if (origin) {
-          let originHost: string
-          try {
-            originHost = new URL(origin).host
-          } catch {
-            writeJson(res, 400, envelopeError('invalid-origin', 'invalid Origin header'))
-            return
-          }
-          if (!req.headers.host || originHost !== req.headers.host) {
-            writeJson(res, 403, envelopeError('origin-not-allowed', 'same-origin requests only'))
-            return
-          }
-        }
-        if (!String(req.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+        if (req.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') {
           writeJson(res, 415, envelopeError('content-type-not-supported', 'application/json required'))
           return
         }

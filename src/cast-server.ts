@@ -18,6 +18,7 @@ import type { EgoContext, RegisterRouteOptions, ResolvedConfig, WebServerLike } 
 import type { SettingsBridge } from './settings.ts'
 import type { FfmpegInstallationManager, FfmpegStatus } from './ffmpeg-installation.ts'
 import type { LoginImportOptions, LoginImportReport } from './login-import.ts'
+import { isTrustedDesktopRequest } from './request-trust.ts'
 
 const WORKER_BIN = fileURLToPath(new URL('../bin/ego-cast-worker.mjs', import.meta.url))
 
@@ -523,22 +524,25 @@ export function initCastServer(
   // ── trust fence for /api/ego/* ────────────────────────────────────────────
   // Exact-path routes match BEFORE the host's `/api` prefix trust-fence route,
   // so every handler below would otherwise answer unauthenticated requests.
-  // The host issues a `dsh-auth-<processKey>` cookie that is HttpOnly AND
-  // SameSite=Strict: a cross-site page (CSRF driver-by) never carries it, so
-  // requiring its mere presence closes the remote surface. A local process can
-  // still forge the header, but that is the same threat tier as the host's own
-  // token fence (a local process can read the process token too).
-  const isTrustedRequest = (req: IncomingMessage): boolean =>
-    /(?:^|;\s*)dsh-auth-[^=]+=/.test(String(req.headers.cookie ?? ''))
-  const guardHandler = (handler: NonNullable<RegisterRouteOptions['handler']>) =>
+  // Delegate to the same public Host fence as open-in-app. The deployed rc.2
+  // fence is loopback + browser trust, not a login/identity layer. Remote
+  // callers are refused; inventing a dsh-auth cookie cannot bypass the fence.
+  const readRoutes = new Set([
+    EGO_SPACES_ROUTE, EGO_STREAM_ROUTE, EGO_HEALTH_ROUTE, EGO_WATCH_STATUS_ROUTE,
+    EGO_VIDEO_ROUTE, EGO_VIDEO_STATUS_ROUTE,
+  ])
+  const guardHandler = (path: string, handler: NonNullable<RegisterRouteOptions['handler']>) =>
     async (req: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
-      if (!isTrustedRequest(req as IncomingMessage)) {
-        res.statusCode = 401
-        res.setHeader('Content-Type', 'application/json; charset=utf-8')
-        res.end('{"ok":false,"error":"unauthorized"}')
-        return
+      if (!isTrustedDesktopRequest(ctx, req as IncomingMessage))
+        return sendJson(res, 403, { ok: false, error: 'forbidden' })
+      const method = readRoutes.has(path) ? 'GET' : 'POST'
+      if ((req as IncomingMessage).method !== method) {
+        res.setHeader('Allow', method)
+        return sendJson(res, 405, { ok: false, error: `${method} required` })
       }
+      if (method === 'POST' && (req as IncomingMessage).headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
+        return sendJson(res, 415, { ok: false, error: 'application/json required' })
       return handler(req, res)
     }
   // Scope the guard to THIS plugin's registrations only: never patch the host
@@ -548,7 +552,7 @@ export function initCastServer(
   const server = Object.assign(Object.create(Object.getPrototypeOf(rawServer)), rawServer, {
     register: (opts: RegisterRouteOptions) => rawRegister({
       ...opts,
-      handler: opts.handler ? guardHandler(opts.handler) : opts.handler,
+      handler: guardHandler(opts.path, opts.handler),
     }),
   })
 

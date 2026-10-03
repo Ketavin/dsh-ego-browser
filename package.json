@@ -80,6 +80,8 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-tools": "link:../../p2/core/packages/core/tools",
+    "@deepseek-ai/dsh-settings": "link:../../p2/core/packages/settings/settings",
     "@types/node": "^22.20.1",
     "@types/react": "~18.3.31",
     "@types/ws": "^8.5.10",
