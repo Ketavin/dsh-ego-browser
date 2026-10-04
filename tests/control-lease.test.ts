@@ -27,13 +27,36 @@ describe('shared browser control lease', () => {
     const action = lease.runAgent('A', undefined, async s => { signal = s; await new Promise<void>(resolve => { finish = resolve }) })
     await Promise.resolve()
     const takeover = lease.takeOver('A')
-    const rejected = expect(takeover).rejects.toThrow('cancellation-unverified')
+    const rejected = expect(takeover).rejects.toThrow('takeover-interrupted-run')
     expect(signal.aborted).toBe(true)
     expect(lease.status('A').state).toBe('requesting-human')
     expect(() => lease.assertHuman('A', lease.status('A').leaseEpoch)).toThrow('human-control-required')
     finish(); await action; await rejected
     expect(lease.status('A').state).toBe('paused')
     expect(() => lease.arm('A', lease.status('A').leaseEpoch)).toThrow('cancellation-unverified')
+  })
+  it('distinguishes a fresh interrupted operation from a denial on an already unsafe-paused lease', async () => {
+    const lease = new ControlLease()
+    let finish!: () => void, aborted = 0
+    const action = lease.runAgent('A', undefined, async signal => {
+      signal.addEventListener('abort', () => { aborted++ })
+      await new Promise<void>(resolve => { finish = resolve })
+    })
+    await Promise.resolve()
+    // Fresh interruption: THIS takeover aborts a live browser operation and
+    // fails closed with the explicit interrupted-run receipt.
+    const fresh = expect(lease.takeOver('A')).rejects.toThrow('takeover-interrupted-run')
+    await vi.waitFor(() => expect(aborted).toBe(1))
+    finish(); await action; await fresh
+    expect(lease.status('A').state).toBe('paused')
+    const epochAfterInterruption = lease.status('A').leaseEpoch
+    // A later takeover attempt on the already unsafe-paused lease is refused
+    // BEFORE any new interruption: same fail-closed pause, but the plain
+    // cancellation-unverified denial claims no fresh interruption.
+    await expect(lease.takeOver('A', 5)).rejects.toThrow('cancellation-unverified')
+    expect(aborted, 'no browser operation existed to abort').toBe(1)
+    expect(lease.status('A').leaseEpoch).toBe(epochAfterInterruption)
+    expect(lease.status('A').state).toBe('paused')
   })
   it('keeps the fence after a cancellation timeout or external agent abort', async () => {
     const lease = new ControlLease()
@@ -65,6 +88,20 @@ describe('shared browser control lease', () => {
     expect(lease.once('A', 'same-intent', 'navigate', async () => ++calls)).toBe(first)
     expect(await first).toBe(1)
     expect(calls).toBe(1)
+  })
+  it('binds idempotent receipts to the requesting device and never serves another device', async () => {
+    const lease = new ControlLease(), human = await lease.takeOver('A', 5000, 'device-A')
+    let reads = 0
+    // Mirror the route shape: the cached operation itself re-asserts the lease.
+    const read = (holder: string) => lease.once('A', 'same-request', `context:${human.leaseEpoch}`, () =>
+      lease.runHuman('A', human.leaseEpoch, async () => ({ ok: true, text: `page-${++reads}` }), holder), holder)
+    const first = read('device-A')
+    expect(read('device-A'), 'same-device retry keeps its receipt').toBe(first)
+    // A second device replaying the SAME requestId misses the cache and faces
+    // the holder fence inside the operation instead of the cached page text.
+    await expect(read('device-B')).rejects.toThrow('lease-holder-mismatch')
+    expect(await first).toEqual({ ok: true, text: 'page-1' })
+    expect(reads).toBe(1)
   })
   it('accepts more than 1024 settled inputs while rejecting evicted sequences and old epochs', async () => {
     const lease = new ControlLease(() => 1)
@@ -198,5 +235,74 @@ describe('shared browser control lease', () => {
     await expect(lease.withHumanDrain('A', human.leaseEpoch, async () => { transitions++ }, 5)).rejects.toThrow('control-drain-timeout')
     expect(transitions).toBe(0); expect(() => lease.release('A', human.leaseEpoch)).toThrow('control-busy')
     finish(); await refresh; expect(lease.release('A', human.leaseEpoch).state).toBe('paused')
+  })
+})
+
+describe('client device ownership of the human lease', () => {
+  it('binds human control to the taking device and refuses a second device of the same session', async () => {
+    const lease = new ControlLease()
+    const a = await lease.takeOver('A', 5000, 'device-A')
+    expect(lease.heldBy('A', 'device-A')).toBe(true)
+    expect(lease.heldBy('A', 'device-B')).toBe(false)
+    expect(lease.heldBy('B', 'device-A')).toBe(false)
+    // The same device retakes idempotently; the other device can neither grab nor share.
+    expect((await lease.takeOver('A', 5000, 'device-A')).leaseEpoch).toBe(a.leaseEpoch)
+    await expect(lease.takeOver('A', 5000, 'device-B')).rejects.toThrow('lease-held-elsewhere')
+    // Every human-lease operation refuses the second device...
+    expect(() => lease.assertHuman('A', a.leaseEpoch, 'device-B')).toThrow('lease-holder-mismatch')
+    await expect(lease.runHuman('A', a.leaseEpoch, async () => 'x', 'device-B')).rejects.toThrow('lease-holder-mismatch')
+    expect(() => lease.runHumanInput('A', a.leaseEpoch, 1, 'b-input', async () => {}, 'device-B')).toThrow('lease-holder-mismatch')
+    await expect(lease.withHumanDrain('A', a.leaseEpoch, async () => {}, 5, 'device-B')).rejects.toThrow('lease-holder-mismatch')
+    expect(() => lease.release('A', a.leaseEpoch, 'device-B')).toThrow('lease-holder-mismatch')
+    // ...while the holding device and host-internal calls (no identity) proceed.
+    expect(await lease.runHuman('A', a.leaseEpoch, async () => 'ok', 'device-A')).toBe('ok')
+    expect(await lease.runHuman('A', a.leaseEpoch, async () => 'host')).toBe('host')
+    expect(() => lease.runHumanInput('A', a.leaseEpoch, 1, 'a-input', async () => {}, 'device-A')).toBeTypeOf('function')
+  })
+  it('keeps the holder across release so only that device can prepare, arm, or abort the continuation', async () => {
+    const lease = new ControlLease(), a = await lease.takeOver('A', 5000, 'device-A')
+    const paused = lease.release('A', a.leaseEpoch, 'device-A')
+    expect(paused.state).toBe('paused')
+    // Two-phase continuation belongs to the releasing device alone.
+    expect(() => lease.assertContinuationReady('A', paused.leaseEpoch, 'device-B')).toThrow('lease-holder-mismatch')
+    const prepared = lease.prepareContinuation('A', paused.leaseEpoch, 'device-A')
+    expect(prepared.state).toBe('paused')
+    expect(() => lease.arm('A', prepared.leaseEpoch, 'device-B')).toThrow('lease-holder-mismatch')
+    expect(lease.arm('A', prepared.leaseEpoch, 'device-A').state).toBe('armed')
+    // A foreign abort of a human lease is a silent no-op, never a state change.
+    const again = await lease.takeOver('A', 5000, 'device-A')
+    lease.abortContinuation('A', again.leaseEpoch, 'device-B')
+    expect(lease.status('A').state).toBe('human')
+    lease.abortContinuation('A', again.leaseEpoch, 'device-A')
+    expect(lease.status('A').state).toBe('paused')
+  })
+  it('rebinds the holder after release, expiry, revoke or an agent run — old identities never survive', async () => {
+    let now = 1
+    const lease = new ControlLease(() => now, 10)
+    const a = await lease.takeOver('A', 5000, 'device-A')
+    lease.release('A', a.leaseEpoch, 'device-A')
+    // After an explicit release another device may TAKE OVER (contention → release → reacquire);
+    // the previous holder's operations are then the refused ones.
+    const b = await lease.takeOver('A', 5000, 'device-B')
+    expect(lease.heldBy('A', 'device-B')).toBe(true)
+    expect(() => lease.assertHuman('A', b.leaseEpoch, 'device-A')).toThrow('lease-holder-mismatch')
+    // TTL expiry drops the holder with the lease; either device may retake.
+    now = 1000
+    expect(lease.status('A').state).toBe('paused')
+    expect(lease.heldBy('A', 'device-B')).toBe(false)
+    const c = await lease.takeOver('A', 5000, 'device-A')
+    expect(lease.heldBy('A', 'device-A')).toBe(true)
+    // Session revocation clears the holder identity (a revoked lease stays
+    // fail-closed for takeover, so nothing here may act on the stale identity).
+    lease.revoke('A')
+    expect(lease.heldBy('A', 'device-A')).toBe(false)
+    expect(() => lease.assertHuman('A', c.leaseEpoch, 'device-A')).toThrow()
+    // An armed continuation resumed by an agent run clears the holder too.
+    const second = new ControlLease()
+    const held = await second.takeOver('S', 5000, 'device-A')
+    second.release('S', held.leaseEpoch, 'device-A')
+    expect(second.arm('S', second.status('S').leaseEpoch, 'device-A').state).toBe('armed')
+    await second.runAgent('S', undefined, async () => {})
+    expect(second.heldBy('S', 'device-A')).toBe(false)
   })
 })

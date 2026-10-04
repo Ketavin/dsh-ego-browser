@@ -127,8 +127,8 @@ export interface ScopedBrowserHost {
   runtimeEnv?: NodeJS.ProcessEnv
   continuation?: import('./continuation-gate.ts').ContinuationGate
   validateSession(sessionId: unknown): string
-  navigate(sessionId: string, url: string, leaseEpoch?: unknown, targetId?: unknown): Promise<unknown>
-  context(sessionId: string, leaseEpoch?: unknown, targetId?: unknown): Promise<unknown>
+  navigate(sessionId: string, url: string, leaseEpoch?: unknown, targetId?: unknown, holder?: string): Promise<unknown>
+  context(sessionId: string, leaseEpoch?: unknown, targetId?: unknown, holder?: string): Promise<unknown>
   refreshMembership?(sessionId: string, leaseEpoch: number): Promise<void>
 }
 

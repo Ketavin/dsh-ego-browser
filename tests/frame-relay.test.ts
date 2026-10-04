@@ -306,6 +306,9 @@ describe("frame relay enabled", () => {
 
     const status = parseBody(await h.invoke("/api/ego/watch/status"));
     expect(status.frameRelay).toBe(true);
+    // Local streams never consume remote slots, so the classification aid
+    // reads false on a local request.
+    expect(status.remoteStreamFull).toBe(false);
     // The live worker was found, so nothing was spawned.
     expect(h.spawns).toEqual([]);
   });

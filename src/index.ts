@@ -45,6 +45,7 @@ import { HUMAN_CHECK_PROBE } from './captcha.ts'
 import { Config as ConfigSchema, resolveConfig, EGO_CLI_BLOCKED, CHROME_BLOCKED, filterArgs } from './config.ts'
 import { installEgoBrowserSettings } from './settings.ts'
 import { registerEgoBrowserGateway } from './gateway.ts'
+import { createRemoteAuthorizer, createDisabledRemoteAuthorizer, resolveRemoteAccess, type RemoteAuthorizer } from './remote-access.ts'
 import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import { SessionSpaceRegistry, ScopeError } from './session-spaces.ts'
@@ -768,6 +769,25 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
     return live ?? (config as unknown as Record<string, unknown>)
   })
   const ffmpegManager = getSharedFfmpegInstallationManager()
+  // Remote access authorization is an IMMUTABLE mount-time snapshot of the
+  // composition entry's `remoteAccess` block (exact HTTPS origin, Access
+  // issuer, application audience, single owner subject). It is deliberately
+  // NOT read through the settings bridge and not part of settingKeys, the
+  // SettingsConfig schema or the gateway ALLOWED_KEYS, so browser
+  // Settings/gateway writes cannot move it; changing it means editing the
+  // host composition and restarting. Absent/partial/malformed configuration
+  // disables remote access (fail closed). The owner subject is operator
+  // supplied — never inferred.
+  const remoteAccess = resolveRemoteAccess(config.remoteAccess)
+  const remoteAuth: RemoteAuthorizer | null = remoteAccess.enabled
+    ? createRemoteAuthorizer(remoteAccess.config)
+    : createDisabledRemoteAuthorizer()
+  if (remoteAccess.enabled) {
+    ctx.logger?.info?.('ego-browser: remote access enabled (pinned HTTPS origin, Cloudflare Access JWT required)')
+  } else if ('remoteAccess' in config) {
+    // Diagnostic carries the reason code only — no config field values.
+    ctx.logger?.warn?.(`ego-browser: remote access disabled (${remoteAccess.reason})`)
+  }
   const initialFfmpegConfig = resolveConfig(bridge.source() as RawConfig)
   void ffmpegManager.check({ configuredPath: initialFfmpegConfig.ffmpegPath, requestedEncoder: initialFfmpegConfig.ffmpegEncoder }).catch(() => {
     /* ignore */
@@ -901,7 +921,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         scopes.bind(sessionId)
         return sessionId
       },
-      async navigate(sessionId, url, leaseEpoch, targetId) {
+      async navigate(sessionId, url, leaseEpoch, targetId, holder) {
         if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
         const parsed = new URL(url)
         if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new ScopeError('url-invalid')
@@ -916,10 +936,10 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
           return result.value
         }
         return withEgoLock(() => leaseEpoch !== undefined
-          ? control.runHuman(sessionId, leaseEpoch, () => navigate())
+          ? control.runHuman(sessionId, leaseEpoch, () => navigate(), holder)
           : control.runAgent(sessionId, undefined, navigate))
       },
-      async context(sessionId, leaseEpoch, targetId) {
+      async context(sessionId, leaseEpoch, targetId, holder) {
         if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
         const binding = scopes.require(sessionId)
         if (!binding.targets.size) throw new ScopeError('owned-page-required')
@@ -939,7 +959,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
           return { targetId: context.targetId, url, title: String(context.title ?? '').slice(0, 512), text: String(context.text ?? '').slice(0, 12000) }
         }
         return withEgoLock(() => leaseEpoch !== undefined
-          ? control.runHuman(sessionId, leaseEpoch, () => read())
+          ? control.runHuman(sessionId, leaseEpoch, () => read(), holder)
           : control.runAgent(sessionId, undefined, read))
       },
     }
@@ -952,6 +972,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         () => openAgentWindow(ctx, cfg),
         (opts) => importLoginCookies(opts, { subprocess: ctx.subprocess }),
         host,
+        remoteAuth,
       )
     } catch (err) {
       ctx.logger?.warn?.(

@@ -23,7 +23,7 @@ export interface InputCapture { targetId: string; leaseEpoch: number; hostGenera
 /** One ordered stream per mounted Session; ambiguous downs also require releases. */
 export function createInputDispatcher(transport: ScopedTransport, current: (capture: InputCapture) => boolean,
   onError: () => void = () => {}) {
-  let queue = Promise.resolve()
+  let queue: Promise<unknown> = Promise.resolve()
   const sequence = new Map<string, number>()
   const pressed = new Map<string, { capture: InputCapture; type: string; payload: JsonPayload }>()
   const send = async (capture: InputCapture, type: string, payload: JsonPayload) => {
@@ -35,14 +35,33 @@ export function createInputDispatcher(transport: ScopedTransport, current: (capt
     await transport.post('/api/ego/input', { ...payload, ...capture, inputSeq, type })
     if (type === 'keyUp' || type === 'mouseReleased') pressed.delete(key)
   }
-  const append = (task: () => Promise<void>): Promise<void> => {
+  const append = <T>(task: () => Promise<T>): Promise<T> => {
     const operation = queue.catch(() => {}).then(task)
-    queue = operation.catch(() => { onError() })
+    queue = operation.then(() => undefined, () => { onError() })
     return operation
   }
   return {
     enqueue(capture: InputCapture, type: string, payload: JsonPayload): void {
       void append(async () => { if (current(capture)) await send(capture, type, payload) }).catch(() => {})
+    },
+    /** One bounded ordered insertText with an explicit delivery outcome, so a
+     * draft editor knows admission and the actual reply and never clears text
+     * on a no-op, stale or unproven send. Never rejects. */
+    submitText(capture: InputCapture, text: string): Promise<InputTextOutcome> {
+      if (typeof text !== 'string' || text === '') return Promise.resolve({ state: 'refused', code: 'draft-empty' })
+      if (text.length > DRAFT_TEXT_LIMIT) return Promise.resolve({ state: 'refused', code: 'draft-too-long' })
+      return append(async () => {
+        // Admission: the exact capture must still be current when the queue
+        // reaches this send; a lost lease/page drops it as stale.
+        if (!current(capture)) return { state: 'stale' }
+        try {
+          await send(capture, 'insertText', { text })
+          return { state: 'sent' }
+        } catch (error) {
+          const code = hostErrorCode(error)
+          return code === undefined || UNVERIFIED_OUTCOME.test(code) ? { state: 'unconfirmed' } : { state: 'refused', code }
+        }
+      })
     },
     flush(): Promise<void> {
       return append(async () => {
@@ -83,7 +102,7 @@ export function scopedRoute(path: string, scope: EgoScope, extra: Record<string,
   return `${path}?${query}`
 }
 
-export function createScopedTransport(scope: EgoScope, send: typeof fetch = fetch) {
+export function createScopedTransport(scope: EgoScope, send: typeof fetch = fetch, identity: { clientId?: string } = {}) {
   const frozen = requireScope(scope)
   async function result(response: Response): Promise<JsonPayload> {
     const body = await response.json().catch(() => null) as JsonPayload | null
@@ -97,14 +116,19 @@ export function createScopedTransport(scope: EgoScope, send: typeof fetch = fetc
   return {
     scope: frozen,
     route: (path: string, extra?: Record<string, string>) => scopedRoute(path, frozen, extra),
-    get: async (path: string, signal?: AbortSignal): Promise<JsonPayload> =>
-      result(await send(scopedRoute(path, frozen), { method: 'GET', cache: 'no-store', credentials: 'same-origin', signal })),
+    get: async (path: string, signal?: AbortSignal, extra: Record<string, string> = {}): Promise<JsonPayload> =>
+      result(await send(scopedRoute(path, frozen, extra), { method: 'GET', cache: 'no-store', credentials: 'same-origin', signal })),
     post: async (path: string, body: JsonPayload = {}, signal?: AbortSignal): Promise<JsonPayload> => {
       if (!path.startsWith('/api/ego/') || path.includes('?') || path.includes('#')) throw new Error('invalid-route')
       return result(await send(path, {
         method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
-        // Callers cannot widen the adapter scope. Every mutation has an identity.
-        body: JSON.stringify({ ...body, sessionId: frozen.sessionId, requestId: body.requestId ?? crypto.randomUUID() }), signal,
+        // Callers cannot widen the adapter scope. Every mutation has an identity:
+        // the per-mount client device id backs the human-lease ownership check
+        // (an explicit watch clientId is never overridden).
+        body: JSON.stringify({
+          ...body, sessionId: frozen.sessionId, requestId: body.requestId ?? crypto.randomUUID(),
+          ...(identity.clientId !== undefined && body.clientId === undefined ? { clientId: identity.clientId } : {}),
+        }), signal,
       }))
     },
   }
@@ -158,13 +182,26 @@ export function createConversationBridge(sessions: Rc2Sessions, transport: Scope
   return {
     async takeOver(requestId: string, hostGeneration?: string, leaseEpoch?: number): Promise<JsonPayload> {
       const face = session()
-      // Host fences new browser tool calls before waiting for its action drain.
-      // The whole Conversation cancellation is an additional, distinct action.
-      const takeover = transport.post('/api/ego/control/takeover', { requestId, ...(hostGeneration ? { hostGeneration } : {}),
+      // Ask the Host FIRST. The whole Conversation cancellation is a distinct
+      // stop-this-run action with its own side effect, so it may only follow a
+      // takeover the Host actually allowed: a refusal (another device holds
+      // the lease, wrong session/generation, missing identity, dead session)
+      // must never cancel or otherwise disturb the main conversation.
+      const settled = await transport.post('/api/ego/control/takeover', { requestId, ...(hostGeneration ? { hostGeneration } : {}),
         ...(leaseEpoch !== undefined ? { leaseEpoch } : {}) })
         .then(value => ({ value }), error => ({ error }))
+      // The Host grants human control only when no browser operation is in
+      // flight. takeover-interrupted-run/takeover-timeout are explicit receipts
+      // that THIS request actually aborted a running browser operation and
+      // failed closed — that interrupted run is exactly what the stop-this-run
+      // cancel must still stop. A bare cancellation-unverified (an already
+      // unsafe-paused lease refused before any new interruption) is an
+      // unproven denial: it must never cancel a conversation that may have
+      // started after the original pause.
+      const interruptedRun = 'error' in settled && settled.error instanceof Error
+        && (settled.error.message === 'takeover-interrupted-run' || settled.error.message === 'takeover-timeout')
+      if ('error' in settled && !interruptedRun) throw settled.error
       const cancelled = await face.cancel().catch(() => ({ ok: false }))
-      const settled = await takeover
       if (!cancelled.ok) {
         if ('value' in settled) {
           const control = settled.value.control as { leaseEpoch?: number } | undefined
@@ -244,23 +281,30 @@ export function createConversationBridge(sessions: Rc2Sessions, transport: Scope
   }
 }
 
-export function createKeyboardInput(send: (type: string, payload: JsonPayload) => void) {
-  let composing = false
-  const key = (event: any, type: string) => {
-    if (composing || event.isComposing || event.key === 'Process' || event.key === 'Unidentified') return
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) return
-    if ((event.ctrlKey || event.metaKey) && ['v', 'V'].includes(event.key)) return
-    event.preventDefault()
-    send(type, { key: event.key, code: event.code, windowsVirtualKeyCode: event.keyCode,
-      modifiers: inputModifiers(event) })
-  }
-  return {
-    compositionStart: () => { composing = true },
-    compositionEnd: (event: any) => { composing = false; if (event.data) send('insertText', { text: event.data }); event.target.value = '' },
-    change: (event: any) => { if (!composing && event.target.value) { send('insertText', { text: event.target.value }); event.target.value = '' } },
-    keyDown: (event: any) => key(event, 'keyDown'), keyUp: (event: any) => key(event, 'keyUp'),
-  }
+/** Upper bound of one committed draft send. The host input route enforces its
+ * own body cap; the editor refuses anything larger before admission. */
+export const DRAFT_TEXT_LIMIT = 4000
+
+/** A host refusal answers with a stable dash-code; a transport failure (fetch
+ * drop, abort, unknown exception) proves neither delivery nor refusal. */
+export function hostErrorCode(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : ''
+  return /^[a-z0-9]+(?:-[a-z0-9]+)+$/.test(message) ? message : undefined
 }
+
+/** A host reply whose own code says the outcome is unverified or unconfirmed
+ * is transport-grade ambiguity, not refusal: neither delivery nor refusal is
+ * proven, so the draft must stay for explicit human review. */
+const UNVERIFIED_OUTCOME = /-(?:unverified|unconfirmed)$/
+
+/** Explicit outcome of one draft send: sent (HTTP success — delivery, not page
+ * acceptance), stale (dropped: the lease/page capture was no longer current),
+ * refused (definitive host answer) or unconfirmed (transport ambiguity). */
+export type InputTextOutcome =
+  | { state: 'sent' }
+  | { state: 'stale' }
+  | { state: 'refused'; code: string }
+  | { state: 'unconfirmed' }
 
 export function inputModifiers(event: { altKey?: boolean; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean }): number {
   return (event.altKey ? 1 : 0) | (event.ctrlKey ? 2 : 0) | (event.metaKey ? 4 : 0) | (event.shiftKey ? 8 : 0)

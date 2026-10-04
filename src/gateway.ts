@@ -40,6 +40,17 @@ const ALLOWED_KEYS = new Set<string>([
   'ffmpegEncoder', 'ffmpegPath', 'githubMirror', 'egoCliArgs', 'chromeArgs',
 ])
 
+/**
+ * Remote-access authorization keys. These live in the mount-time composition
+ * entry only (see src/remote-access.ts); a browser Settings/gateway write can
+ * never change the pinned origin, issuer, audience or owner subject. Attempts
+ * are rejected outright — not silently dropped — so the refusal is observable.
+ */
+const REMOTE_ACCESS_KEYS = new Set<string>([
+  'remoteAccess', 'remoteOrigin', 'remoteIssuer', 'remoteAudience', 'remoteOwnerSubject',
+  'origin', 'issuer', 'audience', 'ownerSubject',
+])
+
 interface EnvelopeOk<T> { ok: true; value: T }
 interface EnvelopeError { ok: false; error: { code: string; message: string } }
 type Envelope<T> = EnvelopeOk<T> | EnvelopeError
@@ -133,7 +144,7 @@ export function registerEgoBrowserGateway(
         } catch (error) {
           const e = error as CodedErrorLike
           const message = e instanceof Error ? e.message : String(error)
-          const status = e?.code === 'ffmpeg-unavailable' ? 409 : e?.code === 'ffmpeg-mirror-invalid' ? 400 : 500
+          const status = e?.code === 'remote-access-immutable' ? 403 : e?.code === 'ffmpeg-unavailable' ? 409 : e?.code === 'ffmpeg-mirror-invalid' ? 400 : 500
           writeJson(res, status, envelopeError(e?.code || 'internal', message))
         }
       },
@@ -151,6 +162,18 @@ async function handleSet(
   bridge: SettingsBridge,
   ffmpegManager: FfmpegInstallationManager | null,
 ): Promise<SetResult> {
+  // Remote authorization keys are host-owned and immutable from the browser.
+  // Reject before any settings write is attempted (no partial application).
+  const raw = Reflect.get(Object(body), 'patch')
+  if (isObject(raw)) {
+    for (const key of Object.keys(raw as Record<string, unknown>)) {
+      if (REMOTE_ACCESS_KEYS.has(key)) {
+        const error = new Error('ego-browser: remote access configuration is set by the host and cannot be changed from the browser') as CodedErrorLike
+        error.code = 'remote-access-immutable'
+        throw error
+      }
+    }
+  }
   const patch = extractPatch(body)
   if (Object.keys(patch).length === 0) {
     return { config: resolveConfig(bridge.source() as RawConfig), ffmpegStatus: ffmpegManager?.status() || null }

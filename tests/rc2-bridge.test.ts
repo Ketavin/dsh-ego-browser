@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { browserCoordinates, createConversationBridge, createInputDispatcher, createKeyboardInput, createScopedTransport,
-  pagePrompt, releaseHumanOnDispose, safePageUrl, scopedRoute, validatePageContext, type JsonPayload } from '../src/client/rc2-bridge.ts'
+import { browserCoordinates, createConversationBridge, createInputDispatcher, createScopedTransport,
+  DRAFT_TEXT_LIMIT, hostErrorCode, pagePrompt, releaseHumanOnDispose, safePageUrl, scopedRoute,
+  validatePageContext, type JsonPayload } from '../src/client/rc2-bridge.ts'
 import { frameSource, subscribeAutoOpen, validTargets } from '../src/client/rc2-client.ts'
 const scope = { sessionId: 'session-a' }
 const context = { ...scope, hostGeneration: 'host-1', targetId: 'owned-a', url: 'https://example.com/path?code=secret&state=hidden#token',
@@ -92,11 +93,21 @@ describe('explicit Conversation bridge', () => {
     await expect(bridge.submit('read-1', 'queue')).resolves.toEqual({ accepted: true })
     expect(prompt).toHaveBeenCalledTimes(1)
   })
-  it('cancels the bound whole Conversation without claiming busy browser actions stopped', async () => {
+  it('cancels the conversation only on a verified fresh interruption, never an unproven pause denial', async () => {
     const { bridge, cancel, send } = fixture()
+    // An already unsafe-paused lease denial carries no proof THIS request
+    // interrupted anything: no conversation may be cancelled on it alone.
     send.mockImplementationOnce(async () => response({ ok: false, code: 'cancellation-unverified' }, 409))
-    await expect(bridge.takeOver('takeover-1')).rejects.toThrow('cancellation-unverified')
+    await expect(bridge.takeOver('denied-1')).rejects.toThrow('cancellation-unverified')
+    expect(cancel).not.toHaveBeenCalled()
+    // The explicit fresh-interruption receipt — and only it (plus a genuine
+    // takeover timeout) — justifies stopping the whole Conversation.
+    send.mockImplementationOnce(async () => response({ ok: false, code: 'takeover-interrupted-run' }, 409))
+    await expect(bridge.takeOver('takeover-1')).rejects.toThrow('takeover-interrupted-run')
     expect(cancel).toHaveBeenCalledTimes(1)
+    send.mockImplementationOnce(async () => response({ ok: false, code: 'takeover-timeout' }, 409))
+    await expect(bridge.takeOver('takeover-2')).rejects.toThrow('takeover-timeout')
+    expect(cancel).toHaveBeenCalledTimes(2)
   })
   it('releases a granted human lease when whole Conversation cancellation is refused', async () => {
     const { bridge, cancel, calls } = fixture()
@@ -156,6 +167,46 @@ describe('cold background Session metadata auto-open', () => {
 
 describe('ordered human input and exact lease disposal', () => {
   const capture = { targetId: 'owned-a', hostGeneration: 'host-1', leaseEpoch: 4 }
+  it('reports draft sends as sent, refused, unconfirmed or stale without ever losing the text', async () => {
+    const replies: Response[] = []
+    let networkFailure = false
+    const transport = createScopedTransport(scope, (async () => {
+      if (networkFailure) throw new TypeError('Failed to fetch')
+      return replies.shift() ?? response({ ok: true })
+    }) as typeof fetch)
+    let current = true
+    const dispatcher = createInputDispatcher(transport, leased => current && leased.leaseEpoch === capture.leaseEpoch)
+    // A positive reply is delivery, not page acceptance — but it is 'sent'.
+    await expect(dispatcher.submitText(capture, '中文输入')).resolves.toEqual({ state: 'sent' })
+    replies.push(response({ ok: false, code: 'control-busy' }, 409))
+    await expect(dispatcher.submitText(capture, '再次')).resolves.toEqual({ state: 'refused', code: 'control-busy' })
+    // A host code that itself reports an unverified outcome is ambiguity.
+    replies.push(response({ ok: false, code: 'input-outcome-unverified' }, 502))
+    await expect(dispatcher.submitText(capture, '未证实时')).resolves.toEqual({ state: 'unconfirmed' })
+    networkFailure = true
+    await expect(dispatcher.submitText(capture, '第三次')).resolves.toEqual({ state: 'unconfirmed' })
+    networkFailure = false
+    // A lease/page that is no longer current drops the send before dispatch.
+    current = false
+    await expect(dispatcher.submitText(capture, '过期草稿')).resolves.toEqual({ state: 'stale' })
+    current = true
+    await expect(dispatcher.submitText(capture, '')).resolves.toEqual({ state: 'refused', code: 'draft-empty' })
+    await expect(dispatcher.submitText(capture, 'x'.repeat(DRAFT_TEXT_LIMIT + 1))).resolves.toEqual({ state: 'refused', code: 'draft-too-long' })
+    expect(hostErrorCode(new Error('lease-not-owned'))).toBe('lease-not-owned')
+    expect(hostErrorCode(new TypeError('Failed to fetch'))).toBeUndefined()
+  })
+  it('orders a draft send behind earlier accepted input with the next input sequence', async () => {
+    const bodies: JsonPayload[] = []
+    const transport = createScopedTransport(scope, (async (_path, options) => {
+      bodies.push(JSON.parse(options!.body as string)); return response({ ok: true })
+    }) as typeof fetch)
+    const dispatcher = createInputDispatcher(transport, () => true)
+    dispatcher.enqueue(capture, 'keyDown', { key: 'Enter', code: 'Enter' })
+    await expect(dispatcher.submitText(capture, '后续文字')).resolves.toEqual({ state: 'sent' })
+    expect(bodies.map(body => body.type)).toEqual(['keyDown', 'insertText'])
+    expect(bodies.map(body => body.inputSeq)).toEqual([1, 2])
+    expect(bodies[1]).toMatchObject({ ...capture, text: '后续文字' })
+  })
   it('assigns monotonic sequence numbers and drains accepted input before ups', async () => {
     const bodies: JsonPayload[] = []
     const transport = createScopedTransport(scope, (async (_path, options) => {
@@ -223,16 +274,5 @@ describe('bounded frame/page and IME', () => {
     expect(browserCoordinates({ clientX: 200, clientY: 200 }, rect, { width: 800, height: 400 })).toEqual({ x: 400, y: 200 })
     expect(browserCoordinates({ clientX: 200, clientY: 50 }, rect, { width: 800, height: 400 })).toBeUndefined()
     expect(browserCoordinates({ clientX: 1, clientY: 1 }, rect, { width: 0, height: 0 })).toBeUndefined()
-  })
-  it('commits Chinese IME exactly once and keeps special key down/up separate', () => {
-    const send = vi.fn(), keyboard = createKeyboardInput(send), target = { value: '中文' }
-    keyboard.compositionStart(); keyboard.change({ target })
-    keyboard.keyDown({ key: 'Process', preventDefault: vi.fn() })
-    expect(send).not.toHaveBeenCalled()
-    keyboard.compositionEnd({ data: '中文', target }); keyboard.change({ target })
-    expect(send).toHaveBeenCalledExactlyOnceWith('insertText', { text: '中文' })
-    const event = { key: 'Enter', code: 'Enter', keyCode: 13, preventDefault: vi.fn() }
-    keyboard.keyDown(event); keyboard.keyUp(event)
-    expect(send.mock.calls.slice(1).map(call => call[0])).toEqual(['keyDown', 'keyUp'])
   })
 })

@@ -93,26 +93,26 @@ describe('scoped HTTP host routes (loopback fixtures, no browser)', () => {
     const h = await harness()
     expect((await h.post('/api/ego/input', { sessionId: 'A', targetId: 'target-A' })).status).toBe(409)
     expect((await h.post('/api/ego/input', { sessionId: 'A', requestId: 'input', targetId: 'target-A' })).status).toBe(409)
-    const human = await (await h.post('/api/ego/control/takeover', { sessionId: 'A', requestId: 'takeover' })).json()
+    const human = await (await h.post('/api/ego/control/takeover', { sessionId: 'A', requestId: 'takeover', clientId: 'device-1' })).json()
     expect(human.control.state).toBe('human')
-    expect((await h.post('/api/ego/input', { sessionId: 'A', requestId: 'input-ok', targetId: 'target-A', leaseEpoch: human.control.leaseEpoch, inputSeq: 1, type: 'click', x: 4, y: 8 })).status).toBe(200)
+    expect((await h.post('/api/ego/input', { sessionId: 'A', requestId: 'input-ok', targetId: 'target-A', leaseEpoch: human.control.leaseEpoch, inputSeq: 1, type: 'click', x: 4, y: 8, clientId: 'device-1' })).status).toBe(200)
     await expect(h.host.control.runAgent('A', undefined, async () => {})).rejects.toThrow('agent-control-blocked')
-    const released = await (await h.post('/api/ego/control/release', { sessionId: 'A', requestId: 'continue', leaseEpoch: human.control.leaseEpoch })).json()
+    const released = await (await h.post('/api/ego/control/release', { sessionId: 'A', requestId: 'continue', leaseEpoch: human.control.leaseEpoch, clientId: 'device-1' })).json()
     expect(released.control.state).toBe('paused')
     expect((await (await h.post('/api/ego/control/arm', { sessionId: 'A', requestId: 'unsafe-arm', leaseEpoch: released.control.leaseEpoch })).json()).code).toBe('continuation-gate-required')
-    const prepared = await (await h.post('/api/ego/control/prepare-continue', { sessionId: 'A', requestId: 'prepare', leaseEpoch: released.control.leaseEpoch })).json()
+    const prepared = await (await h.post('/api/ego/control/prepare-continue', { sessionId: 'A', requestId: 'prepare', leaseEpoch: released.control.leaseEpoch, clientId: 'device-1' })).json()
     h.nextTurn.push({ id: 'durable-new-user-message', source: { kind: 'user' }, content: [{ type: 'text', text: prepared.continuation.marker }] })
-    const armed = await (await h.post('/api/ego/control/commit-continue', { sessionId: 'A', requestId: 'commit', continuationId: prepared.continuation.continuationId, leaseEpoch: prepared.continuation.leaseEpoch })).json()
+    const armed = await (await h.post('/api/ego/control/commit-continue', { sessionId: 'A', requestId: 'commit', continuationId: prepared.continuation.continuationId, leaseEpoch: prepared.continuation.leaseEpoch, clientId: 'device-1' })).json()
     expect(armed.control.state).toBe('armed')
-    const rollback = await (await h.post('/api/ego/control/release', { sessionId: 'A', requestId: 'continue', leaseEpoch: armed.control.leaseEpoch })).json()
+    const rollback = await (await h.post('/api/ego/control/release', { sessionId: 'A', requestId: 'continue', leaseEpoch: armed.control.leaseEpoch, clientId: 'device-1' })).json()
     expect(rollback.control.state).toBe('paused')
   })
   it('deduplicates navigation and supplies scoped context with explicit metadata', async () => {
-    const h = await harness(), body = { sessionId: 'A', requestId: 'url-intent', url: 'https://example.org' }
+    const h = await harness(), body = { sessionId: 'A', requestId: 'url-intent', url: 'https://example.org', clientId: 'device-1' }
     const [a, b] = await Promise.all([h.post('/api/ego/navigate', body), h.post('/api/ego/navigate', body)])
     expect(a.status).toBe(200); expect(b.status).toBe(200)
     expect(h.navigate).toHaveBeenCalledTimes(1)
-    const data = await (await h.post('/api/ego/context', { sessionId: 'A', requestId: 'read-page' })).json()
+    const data = await (await h.post('/api/ego/context', { sessionId: 'A', requestId: 'read-page', clientId: 'device-1' })).json()
     expect(data.context).toMatchObject({ sessionId: 'A', hostGeneration: h.host.scopes.generation, targetId: 'target-A', text: 'Owned context' })
   })
   it('rejects unscoped streams and keeps profile/global/native-window routes explicitly disabled', async () => {
@@ -127,7 +127,7 @@ describe('scoped HTTP host routes (loopback fixtures, no browser)', () => {
     const h = await harness()
     expect((await h.read('/api/ego/control/status?sessionId=A&hostGeneration=old-host')).status).toBe(409)
     for (const path of ['context', 'navigate']) {
-      const res = await h.post('/api/ego/' + path, { sessionId: 'A', requestId: path, targetId: 'target-B', url: 'https://example.org' })
+      const res = await h.post('/api/ego/' + path, { sessionId: 'A', requestId: path, targetId: 'target-B', url: 'https://example.org', clientId: 'device-1' })
       expect((await res.json()).code).toBe('target-not-owned')
     }
     expect(h.navigate).not.toHaveBeenCalled(); expect(h.context).not.toHaveBeenCalled()
@@ -178,8 +178,8 @@ describe('scoped HTTP host routes (loopback fixtures, no browser)', () => {
   })
   it('blocks release until held target input is drained without resuming Agent tools', async () => {
     const h = await harness()
-    const human = await (await h.post('/api/ego/control/takeover', { sessionId: 'A', requestId: 'take' })).json()
-    const body = { sessionId: 'A', targetId: 'target-A', leaseEpoch: human.control.leaseEpoch, key: 'Shift', code: 'ShiftLeft' }
+    const human = await (await h.post('/api/ego/control/takeover', { sessionId: 'A', requestId: 'take', clientId: 'device-1' })).json()
+    const body = { sessionId: 'A', targetId: 'target-A', leaseEpoch: human.control.leaseEpoch, key: 'Shift', code: 'ShiftLeft', clientId: 'device-1' }
     expect((await h.post('/api/ego/input', { ...body, requestId: 'down', inputSeq: 1, type: 'keyDown' })).status).toBe(200)
     expect((await (await h.post('/api/ego/control/release', { ...body, requestId: 'release-before-drain' })).json()).code).toBe('human-input-held')
     expect((await h.post('/api/ego/input', { ...body, requestId: 'up', inputSeq: 5, type: 'keyUp' })).status).toBe(200)

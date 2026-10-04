@@ -1,0 +1,36 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "round": "S2 final slow-channel repair (REVIEW-S2-R4)",
+  "date": "2026-10-04",
+  "node_path_workaround_child_only": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules",
+  "typecheck": { "command": "npm run typecheck", "exit": 0, "configs": ["tsconfig.json", "tsconfig.client.json"] },
+  "full_plugin_suite": {
+    "command": "NODE_PATH=<child-only sidebar node_modules> npx vitest run (cwd ego)",
+    "test_files": "36 passed | 1 skipped (37)",
+    "tests": "308 passed | 0 failed | 5 skipped (313)",
+    "skips_are_infra": "tests/login-import-e2e.test.ts (5 tests) skip without a real Chrome/profile environment; unchanged from prior rounds",
+    "delta_vs_r3": "+3 new slow-channel regression tests in tests/rc2-client-lifecycle.test.ts (305 -> 308)"
+  },
+  "root_suites_read_only_unmodified": {
+    "slow_refresh": {
+      "config": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s2/codex-slow-refresh.config.ts",
+      "command": "NODE_PATH=<child-only> npx vitest run --config <absolute config> (cwd ego, ego-local Vitest 3.2)",
+      "tests": "1 passed | 0 failed (1)"
+    },
+    "extension_seams": { "tests": "2 passed | 0 failed (2)" },
+    "all_boundaries": { "tests": "11 passed | 0 failed (11)", "split": { "s1_codex-boundaries": 4, "s1_codex-hardening": 2, "s1_codex-route-cleanup": 1, "s2_codex-device-cache": 4 } }
+  },
+  "build": { "command": "npm run build", "exit": 0, "lib_index_js_kB": 229.60, "worker_mjs_kB": 184.91 },
+  "nul_byte_scan": "clean across changed sources, tests, docs and lib/bin artifacts",
+  "changed_this_round": [
+    "src/client/rc2-client.ts (refresh: independent status/spaces channel sequencing, single-flight spaces, committed-generation discard, sessionClientId cleared on plugin unregister)",
+    "tests/rc2-client-lifecycle.test.ts (delaySpaces + request-time generation stamping in fixture; 3 new slow-channel regressions)",
+    "docs/DSH-RC2-ADAPTATION.md (channel scheduling paragraph)",
+    "lib/ build artifacts"
+  ],
+  "not_run": [
+    "true Cloudflare Access/WAN/second physical device (joint hard gate; Canary plan UNAPPROVED/NOT ACTIVE)",
+    "real provider OAuth/login import, actual accounts",
+    "actual compiled CLI/browser lane (Codex-owned)"
+  ]
+}

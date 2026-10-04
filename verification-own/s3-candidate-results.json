@@ -1,0 +1,75 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "step": "s3-candidate",
+  "date": "2026-10-04",
+  "worktree": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/ego",
+  "branch": "Ketavin/ego-remote-20261003",
+  "baseHead": "22a229245ec336fb4a132e88e312221575b5d5b8",
+  "planSha256Approved": "001499402b31e51adcb382f0ef9b3328f94ceb9e805d2d1efbc6682228c6a422",
+  "version": {
+    "new": "0.8.6-dsh-remote.1",
+    "prior": "0.8.6-dsh-rc2.5",
+    "note": "New candidate version; rc2.5 tarballs dsh-ego-browser-0.8.6-dsh-rc2.{1..5}.tgz in p3/verification were not overwritten or modified."
+  },
+  "runtimeDependency": "jose@6.2.3 (exact pin, registry-installed at assembly time; not vendored into the tarball)",
+  "coreInterfaces": {
+    "coreUpgrade": "none",
+    "peers": "0.1.1-rc.2 unchanged",
+    "stableInterfaces": "webServer exact-route registration, connection.requestRejection fence (never modified), Session/Agent registry + public maintenance, scope/generation/target services, control lease, Better Sidebar browserUrl tab contract",
+    "requestRejection": "untouched; the remote authorizer runs strictly after the Core fence refuses"
+  },
+  "s3Change": {
+    "capacityHint": {
+      "host": "src/cast-server.ts disposeWatchStatus reply gains read-only remoteStreamFull: requestRemote.has(req) && activeRemoteStreams() >= REMOTE_MAX_STREAMS. Grants nothing, reserves nothing; local streams always read false; enforcement stays only at /api/ego/stream and /api/ego/tool-events (429 remote-stream-capacity before SSE headers).",
+      "client": "src/client/rc2-client.ts failStream classifies remote-stream-capacity and auth-refusal codes directly; an unclassified EventSource failure (no HTTP status/body is exposed to the page) triggers exactly ONE read-only GET /api/ego/watch/status probe whose remoteStreamFull flag selects 已达上限 vs 画面连接中断 wording. The probe never retries and changes no state.",
+      "semantics": "No auth, rate-limit or control semantic changed; no Core contract or wider scope needed."
+    }
+  },
+  "commands": [
+    { "cmd": "npm run typecheck", "result": "pass (tsc -p tsconfig.json && tsc -p tsconfig.client.json, no errors)" },
+    { "cmd": "npm run build", "result": "pass (host lib/index.js, client lib/client.js, worker bin/ego-cast-worker.mjs; remoteStreamFull present in lib/index.js, capacity message present in lib/client.js)" },
+    { "cmd": "NODE_PATH=E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules npx vitest run", "result": "pass: Test Files 36 passed | 1 skipped (37); Tests 324 passed | 5 skipped (329). Prior suite was 323|5; +1 is the new capacity-classification regression in tests/rc2-client-lifecycle.test.ts." },
+    { "cmd": "NODE_PATH=... npx vitest run --config E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s2/codex-slow-refresh.config.ts", "result": "unchanged config, pass: 1 file, 1 test" },
+    { "cmd": "NODE_PATH=... npx vitest run --config .../codex-extension-seams.config.ts", "result": "unchanged config, pass: 1 file, 2 tests" },
+    { "cmd": "NODE_PATH=... npx vitest run --config .../codex-all-boundaries.config.ts", "result": "unchanged config, pass: 4 files, 11 tests" },
+    { "cmd": "NODE_PATH=... npx vitest run --config .../codex-device-cache.config.ts", "result": "unchanged config, pass: 1 file, 4 tests" },
+    { "cmd": "NODE_PATH=... npx vitest run --config .../codex-final-boundaries.config.ts", "result": "unchanged config, pass: 6 files, 14 tests" },
+    { "cmd": "NODE_PATH=... npx vitest run --config .../codex-mobile-independent.config.ts", "result": "unchanged 8-case mobile config, pass: 8/8" }
+  ],
+  "tarball": {
+    "location": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/ego/verification-own/dsh-ego-browser-0.8.6-dsh-remote.1.tgz",
+    "bytes": 327460,
+    "sha256": "b52b91ceebbde0e379752966e769a86827be8689ddd36330c14028dc7356b7a0",
+    "npmShasum": "6dc319f3eae236e16af5dba1034ff2d91ebfcf69",
+    "files": 51,
+    "closure": {
+      "package.json": "version 0.8.6-dsh-remote.1, files includes docs/DSH-REMOTE-ACCESS.md, dependencies declares jose 6.2.3",
+      "host": "package/lib/index.js present and contains remoteStreamFull",
+      "worker": "package/bin/ego-cast-worker.mjs present",
+      "client": "package/lib/client.js present and contains the capacity message",
+      "docs": "package/docs/DSH-RC2-ADAPTATION.md and package/docs/DSH-REMOTE-ACCESS.md present",
+      "notes": "package/THIRD_PARTY_NOTICES.md and package/dsh-plugin.json present; *.map excluded by files pattern"
+    }
+  },
+  "docs": {
+    "new": "docs/DSH-REMOTE-ACCESS.md — mount-time remoteAccess config contract, authorization chain, single-owner multi-device control vs watching distinction, 4 concurrent remote SSE streams shared by frame streams AND tool-events (NOT a per-device guarantee), JWT expiry/revocation/SSO-refresh fail-closed behavior, disconnect never replays draft or main conversation, no token/cookie/JWT/owner/audience in refusals or logs, Access login vs target-website OAuth NOT RUN boundary, jose pin and packaging notes.",
+    "updated": "docs/DSH-RC2-ADAPTATION.md — version header 0.8.6-dsh-remote.1 and a dsh-remote.1 follow-up paragraph; rc2.x history paragraphs unchanged."
+  },
+  "git": {
+    "commit": "recorded in the handoff message and git log after this file was committed",
+    "contents": "one candidate commit of all S1/S2/S3 sources, tests, docs, package manifest, lockfile, built lib/ artifacts, and verification-own records including this file and the tarball",
+    "notDone": ["push", "PR", "merge", "npm publish", "tag changes"]
+  },
+  "unexecuted": [
+    "joint mirror assembly and joint regression (Codex assembles the new joint mirror from this repo's candidate docs)",
+    "real business-model automatic Ego invocation — NOT VERIFIED, no fixture claim",
+    "real target-website provider OAuth — NOT RUN/未指定",
+    "900px/Workbench409/workspace joint checks",
+    "new-to-old-to-new rollback drill on the joint mirror",
+    "real-browser computed font-size verification (R8 CSS fix verified in built bundle text only)",
+    "physical iPhone/iOS Safari IME acceptance — still NOT PASSED for Chinese input",
+    "real Cloudflare Access issuance / tunnel / WAN acceptance and any third-party account",
+    "CI"
+  ],
+  "claims": "This is a bounded S3 candidate handoff. It is NOT S3 user acceptance and NOT a formal release. Historical failures were not rewritten; earlier verification-own records (s2-r3/r4/r6/r7/r8) are preserved unchanged."
+}

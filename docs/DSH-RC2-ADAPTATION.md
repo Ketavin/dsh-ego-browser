@@ -1,6 +1,7 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-rc2.5`. Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-remote.1` (the S3 remote candidate on the reviewed
+rc2.5 line; the S2 reviewed snapshot stays recorded separately). Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -59,6 +60,87 @@ are disabled in scoped reconciliation; another Session's CLI cannot use those
 heuristics to adopt or close a target. A late popup without a previously proven
 parent/context is rejected and may pause the lease, rather than guessed by URL.
 
+## Remote access (plugin-owned Cloudflare Access path)
+
+Remote callers reach the same public `/api/ego/*` routes only through an
+explicit plugin-owned authorization path that runs strictly after the Core
+fence above refuses a request. The fence itself is never loosened, patched or
+fed a fabricated Origin/cookie; the remote path neither re-runs nor overrides
+it. Authorization is a real cryptographic check of the
+`Cf-Access-Jwt-Assertion` header injected by the Cloudflare Access edge
+(RS256 only, verified with `jose` 6.2.3 against the JWKS derived from the
+pinned issuer at `<issuer>/cdn-cgi/access/certs`): signature, issuer,
+application audience, expiry, not-before and the exact human owner subject.
+Forwarded headers alone confer nothing, and a request can never supply its own
+JWKS URL. The request must also carry the pinned HTTPS origin in Host, a
+matching Origin when present (required on non-GET/HEAD), and `same-origin`
+when Sec-Fetch-Site is present, so both fetch and native EventSource calls are
+covered. The Host header is parsed as exactly one legal authority (name,
+name:port, bracketed IPv6 with optional port); malformed values such as
+multiple colons, non-numeric or oversized ports and unbracketed IPv6 are
+rejected rather than treated as absent, while an explicit default `:443`
+equals the portless pin. Duplicate wire fields for Host, Origin,
+Sec-Fetch-Site or the assertion are refused before verification using the raw
+header representation — Node's parsed view silently drops a second Host field,
+so the wire form is what is counted; a duplicate is refused outright, never
+"first wins" or treated as absent. Credentials in URLs are rejected before any
+verification. Pre-verification refusals (malformed request/URL, duplicate or
+mismatched Host/Origin/Sec-Fetch-Site, missing or malformed assertion) make no
+JWKS request and change no state; the verification step itself may fetch the
+JWKS even when the signature or claims ultimately fail. Tokens are never
+written to responses, persistence or logs, and only rejection codes leave the
+module.
+
+Configuration is an immutable mount-time snapshot of the composition entry's
+`remoteAccess` block: exact HTTPS origin, exact
+`https://<team>.cloudflareaccess.com` issuer, application audience and the one
+allowed owner subject (operator-supplied, never inferred). Absent, partial or
+malformed configuration disables remote access entirely; changing it requires
+editing the host composition and restarting. The block is not part of the
+settings schema, the settings bridge or the gateway allow-list, and browser
+gateway writes targeting these fields are rejected outright as
+`remote-access-immutable` (403) before any settings update, not silently
+dropped.
+
+Authorization grants nothing else, and it does not outlive its JWT: after an
+asynchronous wait (a trickling request body, worker health discovery) the
+grant is re-checked before any NEW control or worker operation, and an expired
+request is refused with a safe auth code before any side effect. This is the
+JWT's own lifetime and is independent of the control lease TTL; already
+started operations are not cancelled. Every downstream guard still applies to
+a remote caller: bound method and media type, live session, session/target
+ownership, host generation, namespaced request/client identifiers, takeover
+epoch and the human control lease. A verified JWT cannot reach a different
+conversation or a stale target. The grant is per person, not per device: the
+client-device ownership of human control (below) applies identically, so two
+remote devices presenting the same owner assertion still cannot act on one
+lease simultaneously. The public route set is unchanged.
+
+Remote SSE streams are bounded on top of the existing relay: one connection
+lives at most until the earlier of the verified JWT expiry and a ten-minute
+maximum window (reconnect must re-authorize through the full chain), at most
+four concurrent remote streams, per-frame byte cap, sliding-window frame
+frequency and a violation budget that terminates a runaway stream. A stream
+slot is owned from the moment it is reserved: during worker health discovery a
+client disconnect, the grant deadline or plugin unload returns the slot
+immediately, and no worker stream is opened for a closed, expired or unloaded
+downstream afterwards. One idempotent teardown owns the whole stream: every
+close path — expiry, upstream end/error, downstream disconnect, limits,
+explicit stop, relay refusal, plugin unload — actively destroys the worker
+request and response, clears the deadline timer, returns the stream slot,
+drops the SSE registration and detaches the stream's own backpressure-drain
+and close listeners, each exactly once; a blocked downstream that never
+flushes still closes the upstream, and the per-plugin stream registration —
+its Set entry together with its own route-layer close listener — is removed
+without depending on the downstream closing (other components'
+listeners on the same response are never touched). Expiry only closes the
+picture; it never arms or resumes the Agent. Local desktop streams keep their
+exact previous behavior, and browser frames never enter the shared
+tool-events channel. Fixture evidence uses purpose-owned generated RSA keys
+against loopback JWKS servers; passing it is not a claim about real Cloudflare
+Access issuance, tunnel behavior or WAN acceptance, which remain unverified,
+as does any real third-party OAuth login.
+
 ## Control and public main-conversation bridge
 
 Exactly 25 tools are registered, listed by `SCOPED_EGO_TOOL_NAMES` and
@@ -73,6 +155,64 @@ released before control/continuation handoff. Unconfirmed cancellation or input
 completion pauses fail closed instead of granting another actor permission.
 Hidden/unmounted clients flush input, release the exact lease, and release any
 late grant. Old generations, stale streams and callbacks cannot restore access.
+
+Human control is additionally bound to one client device: the same person may
+open the same chat from several devices, and sessionId+epoch alone cannot tell
+them apart. Every control-affecting request (takeover, navigate, input, close,
+release, explicit page context, prepare/commit/abort continuation) must name
+the requesting device (`clientId`); takeover binds that identity to the lease,
+and a different device of the same session is refused (`lease-held-elsewhere`
+on grab, `lease-holder-mismatch` on act) even with the correct session and
+epoch. Ordered input, idempotency, held-key flushing, fail-closed cancellation
+and the two-phase continuation are unchanged; the holder identity survives an
+explicit release so only the releasing device can continue, and expiry,
+revocation, disposal or a new agent run discard it without replay. Host-side
+membership refreshes carry no device identity and remain trusted internal
+operations. Passive same-session reads (spaces, SSE watch, watch status) stay
+open to every device of the session; the status answer says only whether the
+asking device holds (`held`), never the holder value. This is plugin-internal
+binding of a client-generated identifier, not a cryptographic device
+credential — a device that somehow learned another's identifier could still
+name it.
+
+Idempotent HTTP receipts are bound to the requesting device as well: the
+request cache key includes the client identity, so a second device replaying
+the first device's requestId (takeover, navigate, explicit context, close,
+input, release, prepare/commit/abort) never receives the holder's cached
+receipt — it misses the cache and runs the real holder checks — while a
+genuine same-device retry, including release after the state change, keeps
+its original receipt. The Sidebar's openBrowser/browserUrl callback names the
+same stable per-session device identity as the mounted watch tab (it exists
+even when no tab is mounted, and a repeated open intent keeps both its
+identity and its requestId); it only navigates under the normal
+session/generation fences and never takes over or releases control. On the
+client, the conversation cancellation of a takeover is issued only after the
+Host allowed it, or after the Host's explicit `takeover-interrupted-run`
+receipt saying THIS request actually aborted a running browser operation and
+failed closed (a bounded takeover timeout of a live operation qualifies
+equally); a bare `cancellation-unverified` answer — an already unsafe-paused
+lease refused before any new interruption — is an unproven denial that never
+cancels or otherwise disturbs the main conversation. Local
+input authority is granted only by a requester-bound receipt — a status poll
+or takeover answer naming this device with `held: true` for one exact host
+generation and lease epoch; an identity-less SSE control payload can never
+mint or extend that proof, and any epoch change requires a fresh proof. The
+watch poll runs the control status and the passive spaces/membership read as
+separate channels with separate freshness: they are issued together but settle
+independently, so a spaces reply slower than the poll interval can never
+obsolete a healthy requester-bound control answer or a valid target update,
+and a refused control answer fails closed immediately without waiting for
+spaces. Spaces are single-flight — one outstanding membership pull satisfies
+every tick — and a spaces answer commits only against the host generation the
+status channel last committed for this tab, so an obsolete completion after a
+host-generation or scope change can never restore old targets or authority.
+On an
+authorization refusal, connection loss or stream error the client clears the
+stale frame and its local permission, shows the auth/capacity/channel reason,
+reconnects the picture at most three times before parking until the status
+channel recovers, and never replays queued input or continuation or resumes
+the Agent; a worker/spaces partial failure is reported separately and does
+not revoke a proven lease.
 
 The client uses the actual rc.2 public `sessions.binding`, `SessionFace.prompt`
 and `SessionFace.cancel`, without reopening the active global runtime. Page
@@ -155,3 +295,89 @@ hover/focus/disabled states and wrapping layout; status and the scoped-browser
 notice remain readable in dark and narrow panels. Frame coordinates, control,
 transport and host bytes are unchanged. Final installed light/dark and narrow
 UI checks are recorded separately from the retained rc2.4 functional pass.
+
+The rc2.5 mobile-input follow-up replaces immediate mirror typing with a
+persistent local draft. The old keyboard surface dispatched keystroke-by-
+keystroke and cleared `event.target.value` unconditionally — including on a
+no-op early return and before the asynchronous reply — which erased composing
+Chinese text on iPhone. The draft is now a plain native textarea: IME
+composition, selection, paste and local Enter/Backspace editing only edit the
+local value, are never dispatched piecewise, and never clear anything by
+themselves; a synthetic final `input` after `compositionend` cannot duplicate
+text because the draft is value-driven, not append-driven. One explicit
+`输入到网页` button commits the whole draft (bounded at 4000 characters) as a
+single ordered `insertText` under the captured session/target/host generation
+and lease epoch. Its outcome is explicit: `sent` (the HTTP reply proves CDP
+delivery, not page acceptance — the user is told to check the webpage),
+`refused` (a definitive host dash-code), `unconfirmed` (a transport failure or
+a host code that itself reports an unverified/unconfirmed outcome — the draft
+is kept and the user is asked to inspect the page), or `stale` (the lease/page
+changed before dispatch). Only the `sent` outcome may clear the draft, and
+only when it was not edited while in flight — clearing is decided by a draft
+revision counter, so a re-edit back to the same value is still preserved.
+Failed, refused, stale and unconfirmed sends keep the draft with their reason
+and are never retried or replayed automatically; a duplicate click while a
+send is pending is refused. Remote special keys (回车/退格/Tab/Esc) are explicit
+buttons sending one ordered down/up pair each, so editing the draft can never
+intercept Enter/Backspace/Tab/Escape as remote shortcuts; desktop pointer
+behavior is unchanged. A touch tap on the frame no longer focuses the draft
+textarea — the virtual keyboard would shift the layout between pointer down
+and up and move the tapped coordinates — while mouse pointers keep the focus
+convenience; letterbox coordinate mapping, down/up ordering and generation
+binding are unchanged. Drafts are scoped to the mounted session/page: a real
+target, host-generation or Session change clears the draft, a fail-closed
+channel wipe (authorization refusal, stream loss) instead quarantines it
+intact until the page and authority return, and a draft can never be sent to
+a page other than the one it was written for. Viewer devices stay read-only.
+These are controlled jsdom/React regressions and exported-function checks;
+actual iPhone/iOS Safari IME verification has NOT been run and remains
+pending physical Codex/human acceptance.
+
+The rc2.5 mobile follow-up review (R7) closed three behavioral gaps. First,
+native IME composition is now tracked: while a composition is active the send
+button disables and the send handler refuses (no half-finished candidate
+string is ever transmitted, no remote Enter, no duplicate final input);
+commit and cancel both end at compositionend with the native value final,
+blur resets the flag so it can never stick, and a real page/Host change
+clears it with the draft. Draft selection, Ctrl+A, paste, Backspace and
+Enter stay entirely local, and the draft declares a 16px font so focusing it
+cannot trigger the mobile input zoom (no Safari/version sniffing); an R8
+follow-up corrected that declaration's cascade — the shared
+`.dsh-ego-rc2 textarea{font:inherit}` rule was out-ranking the single-class
+selector in the loaded UI (computed 14px), so the draft rule now qualifies
+the element (`.dsh-ego-rc2 textarea.dsh-ego-rc2-keyboard`) to win without
+`!important` or any theme change. Actual computed font in the real loaded
+browser remains Codex's verification, and native iPhone acceptance is still
+NOT PASSED. Second, desktop page keyboard shortcuts are restored through a focusable page
+keyboard region — the frame image itself: a mouse click on the frame focuses
+that region (not the draft editor), and Ctrl+A/arrows/Enter there reach the
+page as one ordered down/up pair each with their modifiers; Tab keeps its
+focus-moving default and its released down is covered by the blur flush.
+Draft-focused keys are never remote. Reserved browser/OS shortcuts cannot
+all be guaranteed, and no clipboard sync is claimed — pasted text is local
+draft text sent only explicitly. Third, the draft scope tracker now keeps
+the LAST VALID target/generation identity: a transient auth/transport wipe
+sets the state fields empty but no longer overwrites that identity, so
+same-context recovery preserves the quarantined text (never auto-sent),
+while a genuinely different proven Host generation/target/session clears the
+old draft and composition with a concise notice; the revision-counter
+protection still ignores old pending completions, and no old Host operation
+or text replays onto the new Host. Status wording corrected: the original
+public Canary candidate IS approved and active (old installed bytes) with
+physical frame/same-chat takeover/mutual-exclusion evidence — the
+user-reported failure is specifically iPhone Chinese input, so Chinese
+acceptance remains NOT PASSED; the new mobile code in this candidate has
+NOT been publicly activated or physically validated; the old source
+clearing mechanism is confirmed, but no native iPhone event/focus trace was
+captured, so the complete physical cause is not established; real provider
+OAuth remains NOT RUN.
+
+The dsh-remote.1 follow-up (S3) ships the reviewed S1/S2 sources unchanged and
+adds one read-only error-classification aid: the existing watch/status route
+reports `remoteStreamFull`, and on an unclassified EventSource failure the
+panel probes it once to report 远程画面连接已达上限 (close other devices)
+instead of a generic 画面连接中断. The flag grants nothing and reserves
+nothing — capacity stays enforced only at the two SSE routes, and local
+streams (which never consume remote slots) always read false. The full remote
+access, stream-budget and boundary contract is documented separately in
+`docs/DSH-REMOTE-ACCESS.md`.

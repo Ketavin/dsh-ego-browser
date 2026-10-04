@@ -27,12 +27,12 @@ export class ContinuationGate {
   private receipt(entry: Entry) {
     return { continuationId: entry.id, leaseEpoch: entry.epoch, hostGeneration: entry.generation, marker: entry.marker, expiresAt: entry.expiresAt }
   }
-  async prepare(sessionId: string, epoch: unknown) {
-    return this.control.withHumanDrain(sessionId, epoch, () => this.prepareDrained(sessionId, epoch))
+  async prepare(sessionId: string, epoch: unknown, holder?: string) {
+    return this.control.withHumanDrain(sessionId, epoch, () => this.prepareDrained(sessionId, epoch, holder), 5000, holder)
   }
-  private async prepareDrained(sessionId: string, epoch: unknown) {
+  private async prepareDrained(sessionId: string, epoch: unknown, holder?: string) {
     this.scopes.require(sessionId)
-    this.control.assertContinuationReady(sessionId, epoch)
+    this.control.assertContinuationReady(sessionId, epoch, holder)
     if (this.active) throw new ScopeError('continuation-busy')
     const agent = this.agent(sessionId)
     let idleTimer: ReturnType<typeof setTimeout> | undefined
@@ -47,7 +47,7 @@ export class ContinuationGate {
       maintenance = agent.runMaintenance(signal => {
         try {
           this.scopes.require(sessionId)
-          const status = this.control.prepareContinuation(sessionId, epoch)
+          const status = this.control.prepareContinuation(sessionId, epoch, holder)
           if (signal.aborted) throw new ScopeError('continuation-cancelled')
           let finish!: () => void
           const hold = new Promise<void>(resolve => { finish = resolve })
@@ -80,25 +80,27 @@ export class ContinuationGate {
     this.scopes.require(sessionId)
     return entry
   }
-  commit(sessionId: string, id: unknown, epoch: unknown) {
+  commit(sessionId: string, id: unknown, epoch: unknown, holder?: string) {
     const entry = this.require(sessionId, id, epoch)
     const admitted = [...entry.agent.inbox.nextTurn, ...entry.agent.inbox.nextStep].some(message =>
       !entry.baseline.has(message.id) && message.source?.kind === 'user' && message.content.some(block => block.type === 'text' && block.text === entry.marker))
     if (!admitted) throw new ScopeError('continuation-admission-unverified')
-    this.control.arm(sessionId, epoch)
+    this.control.arm(sessionId, epoch, holder)
     this.end(entry, true)
     return { continuationId: entry.id, admitted: true }
   }
-  abort(sessionId: string, id: unknown, epoch: unknown) {
+  abort(sessionId: string, id: unknown, epoch: unknown, holder?: string) {
     const entry = this.require(sessionId, id, epoch)
-    this.end(entry, false)
+    // Only the lease-holding device may abort its own prepared continuation.
+    if (!this.control.holderMatches(holder)) throw new ScopeError('lease-holder-mismatch')
+    this.end(entry, false, holder)
     return { continuationId: entry.id, admitted: false }
   }
-  private end(entry: Entry, committed: boolean): void {
+  private end(entry: Entry, committed: boolean, holder?: string): void {
     if (this.active !== entry) return
     this.active = undefined
     clearTimeout(entry.timer); entry.signal.removeEventListener('abort', entry.abortListener)
-    if (!committed) this.control.abortContinuation(entry.sessionId, entry.epoch)
+    if (!committed) this.control.abortContinuation(entry.sessionId, entry.epoch, holder)
     entry.finish()
   }
   revoke(sessionId: string): void { if (this.active?.sessionId === sessionId) this.end(this.active, false) }
