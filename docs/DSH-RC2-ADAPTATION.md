@@ -1,7 +1,8 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-remote.1` (the S3 remote candidate on the reviewed
-rc2.5 line; the S2 reviewed snapshot stays recorded separately). Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-remote.2` (the S3 remote candidate on the reviewed
+rc2.5 line; the S2 reviewed snapshot, the `dsh-remote.1` commit and its
+package stay recorded separately as historical evidence). Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -380,4 +381,10 @@ instead of a generic 画面连接中断. The flag grants nothing and reserves
 nothing — capacity stays enforced only at the two SSE routes, and local
 streams (which never consume remote slots) always read false. The full remote
 access, stream-budget and boundary contract is documented separately in
-`docs/DSH-REMOTE-ACCESS.md`.
+`docs/DSH-REMOTE-ACCESS.md`. The dsh-remote.2 follow-up corrects that
+document's lifecycle wording only — bounded passive picture retry, a fresh
+requester-bound receipt re-proving a still-valid same-client lease, explicit
+takeover only when the lease is absent/expired/held elsewhere, and
+application revocation described through the protected Access edge — with no
+runtime, control or authorization source change; the remote.1 commit and
+package are preserved unchanged.

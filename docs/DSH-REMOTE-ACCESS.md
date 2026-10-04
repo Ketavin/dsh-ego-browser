@@ -1,10 +1,11 @@
 # DSH remote Agent Browser access contract (S3 candidate)
 
-Local candidate version `0.8.6-dsh-remote.1` on the reviewed rc2.5 source
+Local candidate version `0.8.6-dsh-remote.2` on the reviewed rc2.5 source
 line (base `22a229245ec336fb4a132e88e312221575b5d5b8` plus the reviewed
-S1/S2 diffs). This document is the packaging contract for the remote access
-path; `DSH-RC2-ADAPTATION.md` remains the adaptation note for the local
-candidate. Neither document is a release acceptance.
+S1/S2 diffs); the `0.8.6-dsh-remote.1` package and commit are preserved as
+historical evidence. This document is the packaging contract for the remote
+access path; `DSH-RC2-ADAPTATION.md` remains the adaptation note for the
+local candidate. Neither document is a release acceptance.
 
 ## Configuration (mount-time, not Settings)
 
@@ -62,12 +63,27 @@ command-line token.
   and reserves nothing; enforcement stays at the stream routes; local streams
   never consume remote slots. Slots are released on disconnect, close,
   deadline, expiry or plugin unload.
-- **Expiry, revocation and re-auth.** Token expiry or an application-level
-  token revocation ends streams and fails closed: frames clear, control and
-  draft input are disabled locally, and the host lease itself is untouched.
-  Nothing reconnects, resumes or replays by itself. After Access SSO
-  re-authentication the tab returns to passive watching; human control needs
-  an explicit takeover again.
+- **Expiry, revocation and re-auth.** Token expiry — or an application-level
+  token revocation performed through the Cloudflare Zero Trust admin, after
+  which the protected Access edge stops admitting that application's
+  sessions (the origin verifies each freshly presented assertion and keeps
+  no revocation list of its own) — ends streams and fails closed: frames
+  clear, control and draft input are disabled locally, and the host lease
+  itself is untouched. Passive recovery is bounded, never silent: the picture
+  channel retries at most three consecutive times before parking until the
+  status channel recovers, and it reconnects only once a request actually
+  passes authorization again; no draft, queued input, main Conversation or
+  Agent execution is ever replayed or resumed implicitly. Authentication
+  alone never grants control: authority returns only through a fresh
+  requester-bound receipt (a status poll or takeover answer naming this
+  device with `held: true` for the current host generation and lease epoch).
+  A human lease that is still valid and still this same client's may be
+  re-proved by such a receipt without a new takeover; if the lease is
+  absent, expired or held by another device, an explicit takeover is
+  required. The accepted R12 recovery evidence observed the first device
+  passive after re-authentication — it did not test, and does not promise,
+  a blanket always-passive behavior for a still-live same-client human
+  lease.
 - **No replay of human work.** A disconnect, expiry, refusal or host
   generation change never replays queued input, re-sends a draft or resumes
   the main Conversation; the explicit draft-send semantics (composition guard,
