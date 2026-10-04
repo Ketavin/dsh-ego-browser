@@ -488,6 +488,77 @@ describe('mounted rc.2 Sidebar lifecycle', () => {
     expect(f.container.querySelector('[role="status"]')?.textContent).toContain('画面连接中断')
   })
 
+  it('replaces an obsolete capacity notice when a valid frame recovers the picture', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 3, holder: own })
+    await f.advance(2500)
+    f.fillRemoteStreams(true)
+    await f.emit(f.sources.at(-1)!, 'error', {})
+    expect(f.container.querySelector('[role="status"]')?.textContent).toContain('已达上限')
+    // A slot frees; the bounded retry opens a fresh stream and its first
+    // VALID frame replaces the stale capacity warning with a recovery notice.
+    f.fillRemoteStreams(false)
+    await f.advance(1000)
+    await f.emit(f.sources.at(-1)!, 'frame', { sessionId: 'a', targetId: 'owned-a', hostGeneration: 'host-1', data: 'Wcvv', vw: 640, vh: 480 })
+    const status = f.container.querySelector('[role="status"]')?.textContent ?? ''
+    expect(status).toContain('画面连接已恢复')
+    expect(status).not.toContain('已达上限')
+    expect(f.container.querySelector('img')?.getAttribute('src')).toBe('data:image/jpeg;base64,Wcvv')
+    // The recovered picture grants no input authority of its own: before the
+    // next requester-bound status poll the draft stays disabled.
+    expect(f.container.querySelector('textarea')!.disabled).toBe(true)
+  })
+
+  it('keeps the capacity notice through malformed, stale and unrelated frames', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 3, holder: own })
+    await f.advance(2500)
+    f.fillRemoteStreams(true)
+    const source = f.sources.at(-1)!
+    await f.emit(source, 'error', {})
+    // Malformed frame data never parses into a picture...
+    await f.emit(source, 'frame', { sessionId: 'a', targetId: 'owned-a', hostGeneration: 'host-1', data: '####not-base64####', vw: 640, vh: 480 })
+    // ...and stale or unrelated frames (other target, other session, other
+    // host generation) are refused before any notice may be replaced.
+    await f.emit(source, 'frame', { sessionId: 'a', targetId: 'owned-zzz', hostGeneration: 'host-1', data: 'Wcvv', vw: 640, vh: 480 })
+    await f.emit(source, 'frame', { sessionId: 'b', targetId: 'owned-b', hostGeneration: 'host-1', data: 'Wcvv', vw: 640, vh: 480 })
+    await f.emit(source, 'frame', { sessionId: 'a', targetId: 'owned-a', hostGeneration: 'host-0', data: 'Wcvv', vw: 640, vh: 480 })
+    const status = f.container.querySelector('[role="status"]')?.textContent ?? ''
+    expect(status).toContain('已达上限')
+    expect(status).not.toContain('画面连接已恢复')
+    expect(f.container.querySelector('img')).toBeNull()
+  })
+
+  it('keeps a newer action result message through picture recovery frames', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    f.fillRemoteStreams(true)
+    await f.emit(f.sources.at(-1)!, 'error', {})
+    expect(f.container.querySelector('[role="status"]')?.textContent).toContain('已达上限')
+    f.fillRemoteStreams(false)
+    await f.advance(1000) // the bounded retry opens a fresh stream
+    await f.advance(2500) // the next status poll re-proves this device's lease
+    expect(f.container.querySelector('textarea')!.disabled).toBe(false)
+    // A NEWER message (an explicit draft send result) takes the screen…
+    await f.type('恢复后文字')
+    await f.click('输入到网页')
+    expect(f.container.querySelector('[role="status"]')?.textContent).toContain('文字已发送')
+    // …and later valid frames must not erase it with the recovery notice.
+    await f.emit(f.sources.at(-1)!, 'frame', { sessionId: 'a', targetId: 'owned-a', hostGeneration: 'host-1', data: 'Wczz', vw: 640, vh: 480 })
+    const status = f.container.querySelector('[role="status"]')?.textContent ?? ''
+    expect(status).toContain('文字已发送')
+    expect(status).not.toContain('画面连接已恢复')
+    expect(status).not.toContain('已达上限')
+    expect(f.container.querySelector('img')?.getAttribute('src')).toBe('data:image/jpeg;base64,Wczz')
+  })
+
   it('distinguishes an authorization refusal from a channel or partial spaces failure', async () => {
     const f = fixture = harness()
     await f.render()

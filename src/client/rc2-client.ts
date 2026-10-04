@@ -186,7 +186,14 @@ export function applyRc2(ctx: ClientContext): void {
         generation: generation || draftOrigin.current.generation }
       setDraft(value)
     }
-    const notice = (value: string) => { if (mounted.current) setMessage(value) }
+    // The latest notice text (a mirror of the state for event-handler reads)
+    // plus the exact capacity/channel-loss notice currently on screen, if
+    // any. A recovered picture may replace ONLY that stream notice — a newer
+    // input, composition, submission, lease or authorization message, or a
+    // control-channel failure reported by the status poll, is never erased.
+    const messageRef = React.useRef('本会话 Agent 浏览器。')
+    const streamNoticeRef = React.useRef(undefined as string | undefined)
+    const notice = (value: string) => { messageRef.current = value; if (mounted.current) setMessage(value) }
     const dispatcher = React.useRef(undefined as ReturnType<typeof createInputDispatcher> | undefined)
     dispatcher.current ??= createInputDispatcher(transport, captured => {
       const now = live.current
@@ -342,9 +349,14 @@ export function applyRc2(ctx: ClientContext): void {
         const code = error instanceof Error ? error.message : ''
         const conclude = (kind: 'capacity' | 'auth' | 'channel') => {
           if (abort.signal.aborted) return
-          notice(kind === 'capacity' ? '远程画面连接已达上限；请先关闭其他设备的画面。'
+          const text = kind === 'capacity' ? '远程画面连接已达上限；请先关闭其他设备的画面。'
             : kind === 'auth' ? '远程认证未通过或已过期；请重新认证后再操作。'
-            : '画面连接中断；已清空本地图面并暂停控制，恢复后将重连。')
+            : '画面连接中断；已清空本地图面并暂停控制，恢复后将重连。'
+          notice(text)
+          // Only the capacity/channel notices are picture-recovery messages;
+          // an authorization refusal is an authorization fact that a recovered
+          // picture must not mask.
+          if (kind !== 'auth') streamNoticeRef.current = text
           streamFailures.current += 1
           if (streamFailures.current <= 3) {
             retryTimer = window.setTimeout(() => { if (!abort.signal.aborted) setStreamRetry((value: number) => value + 1) }, 1000 * streamFailures.current)
@@ -374,6 +386,14 @@ export function applyRc2(ctx: ClientContext): void {
             if (src === undefined) return
             // Healthy frames reset the reconnect budget.
             streamFailures.current = 0
+            // A valid current-session/target/generation frame proves the
+            // picture recovered: replace the obsolete capacity/channel-loss
+            // notice — but only while it is still the message on screen, so a
+            // newer action or authorization message always survives.
+            if (streamNoticeRef.current !== undefined && messageRef.current === streamNoticeRef.current) {
+              streamNoticeRef.current = undefined
+              notice('画面连接已恢复。')
+            }
             setFrame(src)
             const width = Number(data.vw), height = Number(data.vh)
             if (width > 0 && height > 0) setSize({ width, height })

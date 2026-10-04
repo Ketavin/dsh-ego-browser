@@ -1,8 +1,8 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-remote.2` (the S3 remote candidate on the reviewed
-rc2.5 line; the S2 reviewed snapshot, the `dsh-remote.1` commit and its
-package stay recorded separately as historical evidence). Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-remote.3` (the S3 remote candidate on the reviewed
+rc2.5 line; the S2 reviewed snapshot and the earlier `dsh-remote.1`/`.2`
+commits and packages stay recorded separately as historical evidence). Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -387,4 +387,15 @@ requester-bound receipt re-proving a still-valid same-client lease, explicit
 takeover only when the lease is absent/expired/held elsewhere, and
 application revocation described through the protected Access edge — with no
 runtime, control or authorization source change; the remote.1 commit and
-package are preserved unchanged.
+package are preserved unchanged. The dsh-remote.3 follow-up fixes one client
+notice defect observed on the real R13 Canary: after a capacity or
+channel-loss stream failure, a later VALID current-session/target/generation
+frame now replaces the obsolete 远程画面连接已达上限/画面连接中断 notice
+with 画面连接已恢复 — and only then, because the replacement is gated on the
+notice still being the message on screen. A newer input, composition,
+submission, lease or authorization message is never erased, malformed/stale/
+unrelated frames never trigger it, frames still grant no control authority
+(requester-bound held receipts are unchanged), retry bounds and no-replay
+semantics are untouched, and a stream recovery can never mask an
+independently failed authorization/control channel (the auth refusal and
+control-channel notices are not stream notices).

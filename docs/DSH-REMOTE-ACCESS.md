@@ -1,11 +1,12 @@
 # DSH remote Agent Browser access contract (S3 candidate)
 
-Local candidate version `0.8.6-dsh-remote.2` on the reviewed rc2.5 source
+Local candidate version `0.8.6-dsh-remote.3` on the reviewed rc2.5 source
 line (base `22a229245ec336fb4a132e88e312221575b5d5b8` plus the reviewed
-S1/S2 diffs); the `0.8.6-dsh-remote.1` package and commit are preserved as
-historical evidence. This document is the packaging contract for the remote
-access path; `DSH-RC2-ADAPTATION.md` remains the adaptation note for the
-local candidate. Neither document is a release acceptance.
+S1/S2 diffs); the `0.8.6-dsh-remote.1` and `0.8.6-dsh-remote.2` packages
+and commits are preserved as historical evidence. This document is the
+packaging contract for the remote access path; `DSH-RC2-ADAPTATION.md`
+remains the adaptation note for the local candidate. Neither document is a
+release acceptance.
 
 ## Configuration (mount-time, not Settings)
 
