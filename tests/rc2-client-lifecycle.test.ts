@@ -82,6 +82,12 @@ function harness() {
       return json(receipt(sessionId, requester))
     }
     if (url.pathname === '/api/ego/navigate') return json({ ok: true, sessionId, hostGeneration: state.generation })
+    if (url.pathname === '/api/ego/context') {
+      // A valid scoped page context for explicit read/continue submissions.
+      return json({ ok: true, sessionId, hostGeneration: state.generation,
+        targetId: typeof body.targetId === 'string' ? body.targetId : state.targetId,
+        url: `https://example.test/${sessionId}`, title: `Page ${sessionId}`, text: `page text ${sessionId}` })
+    }
     if (url.pathname === '/api/ego/watch/status') return json({ ok: true, sessionId, hostGeneration: state.generation, frameRelay: true, remoteStreamFull: remoteStreamsFull })
     if (url.pathname === '/api/ego/spaces') {
       // The answer is stamped with the host generation observed at REQUEST
@@ -138,7 +144,9 @@ function harness() {
   }
   vi.stubGlobal('EventSource', FixtureSource)
   const faces = new Map(['a', 'b'].map(sessionId => [sessionId, {
-    sessionId, prompt: vi.fn(async () => ({ ok: true })), cancel: vi.fn(async () => ({ ok: true })),
+    sessionId,
+    prompt: vi.fn(async (_content: { type: 'text'; text: string }[], _mode: 'queue' | 'steer') => ({ ok: true })),
+    cancel: vi.fn(async () => ({ ok: true })),
   }]))
   const sessions = {
     binding: (sessionId: string) => {
@@ -175,6 +183,7 @@ function harness() {
     if (!found) throw new Error(`missing UI button: ${text}`)
     return found
   }
+  const keyboardToggle = () => button('键盘输入')
   const click = async (text: string) => {
     const target = button(text)
     expect(target.disabled).toBe(false)
@@ -223,6 +232,29 @@ function harness() {
     async compose(name: string) {
       await act(async () => {
         container.querySelector('textarea')!.dispatchEvent(new dom.window.Event(name, { bubbles: true }))
+        await Promise.resolve()
+      })
+      await flush()
+    },
+    // The keyboard disclosure toggle (present only for a proven human holder).
+    keyboardToggle,
+    keyboardPanel(): Element { return container.querySelector('.dsh-ego-rc2-keyboard-panel')! },
+    draftBlock(): Element { return container.querySelector('.dsh-ego-rc2-draft')! },
+    // The panel consults the (stubbed) window's matchMedia; a test opts INTO a
+    // coarse-pointer ANSWER here. This stub only replies to the media query —
+    // it never claims a real device, pointer or touchscreen exists.
+    pointerCoarse(on = true) {
+      Object.assign(dom.window, { matchMedia: (query: string): MediaQueryList =>
+        ({ matches: on && query === '(pointer: coarse)', media: query }) as MediaQueryList })
+    },
+    // Native select editing: set the chosen option through the prototype's
+    // native setter and deliver a real change event, as a browser does.
+    async selectMode(value: string) {
+      await act(async () => {
+        const select = container.querySelector('select')!
+        const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, 'value')!.set!
+        setter.call(select, value)
+        select.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
         await Promise.resolve()
       })
       await flush()
@@ -950,5 +982,162 @@ describe('mounted rc.2 Sidebar lifecycle', () => {
     await f.finishKeyDown()
     expect(f.container.querySelector('textarea')!.value).toBe('')
     expect(f.requests.filter(request => request.path === '/api/ego/input').map(request => request.body.text)).toEqual(['旧主机草稿'])
+  })
+
+  it('keeps the remote keyboard hidden until this tab proves human control, then discloses a collapsed desktop toggle', async () => {
+    const f = fixture = harness()
+    await f.render()
+    // Idle: the whole keyboard block is hidden and the editor stays mounted
+    // but disabled — no placeholder keyboard chrome for a watcher.
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(true)
+    expect(f.container.querySelector('textarea')!.disabled).toBe(true)
+    // Another device's lease: still a read-only watcher, still hidden.
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: 'another-device' })
+    await f.advance(2500)
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(true)
+    // This device's own requester-bound receipt opens the disclosure: one
+    // small collapsed toggle (desktop default) wired to its panel by id.
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { holder: own })
+    await f.advance(2500)
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(false)
+    const toggle = f.keyboardToggle()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    const panel = f.keyboardPanel()
+    expect(panel.hasAttribute('hidden')).toBe(true)
+    expect(toggle.getAttribute('aria-controls')).toBe(panel.id)
+    expect(panel.contains(f.container.querySelector('textarea'))).toBe(true)
+    expect(f.container.querySelector('textarea')!.disabled).toBe(false)
+    await f.click('键盘输入')
+    expect(f.keyboardToggle().getAttribute('aria-expanded')).toBe('true')
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(false)
+    expect(f.container.querySelector('textarea')!.disabled).toBe(false)
+  })
+
+  it('preserves the draft and its explicit-send lifecycle across keyboard collapse and expand', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    await f.click('键盘输入') // expand the collapsed desktop panel
+    await f.type('收起后再展开')
+    await f.click('键盘输入') // collapse: layout only, never the draft state
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(true)
+    expect(f.container.querySelector('textarea')!.value).toBe('收起后再展开')
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+    await f.click('键盘输入') // expand again: the same draft is still there
+    expect(f.container.querySelector('textarea')!.value).toBe('收起后再展开')
+    await f.click('输入到网页')
+    const texts = f.requests.filter(request => request.path === '/api/ego/input').map(request => request.body.text)
+    expect(texts).toEqual(['收起后再展开'])
+    expect(f.container.querySelector('textarea')!.value).toBe('')
+  })
+
+  it('collapsing mid-composition never sends and keeps the candidate text local', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    await f.click('键盘输入')
+    await f.compose('compositionstart')
+    await f.type('未确认候选')
+    await f.click('键盘输入') // collapse while the candidate is still active
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+    expect(f.container.querySelector('textarea')!.value).toBe('未确认候选')
+    // Expanding again changes no fence: the composition still blocks sending
+    // until it ends, and only an explicit click may ever transmit the text.
+    await f.click('键盘输入')
+    const send = () => [...f.container.querySelectorAll('button')].find(entry => entry.textContent === '输入到网页')!
+    expect(send().disabled).toBe(true)
+    await f.compose('compositionend')
+    await f.click('输入到网页')
+    expect(f.requests.filter(request => request.path === '/api/ego/input').map(request => request.body.text))
+      .toEqual(['未确认候选'])
+    expect(f.container.querySelector('textarea')!.value).toBe('')
+  })
+
+  it('auto-expands the keyboard once per coarse-pointer acquisition and recovers the draft untouched', async () => {
+    const f = fixture = harness()
+    f.pointerCoarse(true) // a stubbed media answer, not a device claim
+    await f.render()
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(true)
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    // The touch takeover expanded the panel once, by itself.
+    expect(f.keyboardToggle().getAttribute('aria-expanded')).toBe('true')
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(false)
+    await f.type('触屏草稿')
+    await f.click('键盘输入') // an explicit collapse still wins and keeps the draft
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(true)
+    expect(f.container.querySelector('textarea')!.value).toBe('触屏草稿')
+    // Another device takes over: the block hides, the draft survives hidden.
+    Object.assign(f.states.get('a')!, { holder: 'another-device' })
+    await f.advance(2500)
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(true)
+    expect(f.container.querySelector('textarea')!.disabled).toBe(true)
+    expect(f.container.querySelector('textarea')!.value).toBe('触屏草稿')
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+    // Reacquired control recovers the existing draft (coarse re-expands once)
+    // and never automatically inserts it anywhere.
+    Object.assign(f.states.get('a')!, { holder: own })
+    await f.advance(2500)
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(false)
+    expect(f.container.querySelector('textarea')!.value).toBe('触屏草稿')
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+  })
+
+  it('keeps a quarantined draft and the user’s open panel through a channel loss without auto-inserting', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    await f.click('键盘输入')
+    await f.type('断网草稿')
+    // Transport loss hides the whole keyboard (fail closed)…
+    await f.emit(f.sources.at(-1)!, 'error', {})
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(true)
+    expect(f.container.querySelector('textarea')!.disabled).toBe(true)
+    expect(f.container.querySelector('textarea')!.value).toBe('断网草稿')
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+    // …and a fresh requester-bound status restores the holder, the user's
+    // open panel and the draft — with nothing sent on its own.
+    await f.advance(2500)
+    expect(f.draftBlock().hasAttribute('hidden')).toBe(false)
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(false)
+    expect(f.container.querySelector('textarea')!.value).toBe('断网草稿')
+    expect(f.requests.filter(request => request.path === '/api/ego/input')).toHaveLength(0)
+    await f.click('输入到网页')
+    expect(f.requests.filter(request => request.path === '/api/ego/input').map(request => request.body.text))
+      .toEqual(['断网草稿'])
+  })
+
+  it('moves the submit mode into collapsed more-options while keeping steer identifiable outside it', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const more = f.container.querySelector('details.dsh-ego-rc2-more') as HTMLDetailsElement | null
+    if (more === null) throw new Error('missing more-options details')
+    expect(more.open).toBe(false)
+    expect(more.querySelector('select')!.value).toBe('queue')
+    // The default queue mode adds no extra marker to the panel.
+    expect(f.container.querySelector('.dsh-ego-rc2-mode-status')).toBeNull()
+    // The non-default steer mode stays identifiable with the details closed.
+    await f.selectMode('steer')
+    const marker = f.container.querySelector('.dsh-ego-rc2-mode-status')!
+    expect(marker.textContent).toContain('当前轮引导')
+    expect(more.contains(marker)).toBe(false)
+    // The hidden select still governs the real submission mode.
+    await f.click('读取网页到主对话')
+    expect(f.faces.get('a')!.prompt).toHaveBeenCalledTimes(1)
+    expect(f.faces.get('a')!.prompt.mock.calls[0][1]).toBe('steer')
+    // Switching back to the default queue removes the marker again.
+    await f.selectMode('queue')
+    expect(f.container.querySelector('.dsh-ego-rc2-mode-status')).toBeNull()
+    await f.click('读取网页到主对话')
+    expect(f.faces.get('a')!.prompt).toHaveBeenCalledTimes(2)
+    expect(f.faces.get('a')!.prompt.mock.calls[1][1]).toBe('queue')
   })
 })

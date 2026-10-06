@@ -70,6 +70,16 @@ export function frameSource(value: unknown): string | undefined {
   return `data:image/jpeg;base64,${base64}`
 }
 
+/** Whether the current window reports a coarse (touch-style) primary pointer.
+ * A missing or throwing matchMedia (desktop, jsdom, older engines) answers
+ * false: the keyboard then simply stays collapsed until explicitly opened.
+ * This is a layout hint only — never a device identity or authority fact. */
+function coarsePointer(): boolean {
+  try {
+    return typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches === true
+  } catch { return false }
+}
+
 export function applyRc2(ctx: ClientContext): void {
   const React = require('react')
   const sessions = ctx.get?.('sessions') as Rc2Sessions | undefined
@@ -118,6 +128,11 @@ export function applyRc2(ctx: ClientContext): void {
     const [message, setMessage] = React.useState('本会话 Agent 浏览器。')
     const [busy, setBusy] = React.useState(false)
     const [mode, setMode] = React.useState('queue' as 'queue' | 'steer')
+    // Keyboard disclosure: one collapsible editor behind a small toggle,
+    // rendered only for this tab's own proven human holder. The open/closed
+    // choice is pure local UI state — it never touches the draft below.
+    const keyboardPanelId = React.useId()
+    const [keyboardOpen, setKeyboardOpen] = React.useState(false)
     const keyboard = React.useRef(null as HTMLTextAreaElement | null)
     const image = React.useRef(null as HTMLImageElement | null)
     const mounted = React.useRef(true)
@@ -235,6 +250,19 @@ export function applyRc2(ctx: ClientContext): void {
         if (hadText) notice('页面或主机已变化；原草稿已清空。')
       }
     }, [sessionId, targetId, generation])
+    // One disclosure per proven acquisition: a coarse-pointer (touch) device
+    // that just proved human control gets the keyboard expanded once — the
+    // virtual keyboard is why it took over. A desktop pointer never
+    // auto-expands, and neither path touches the draft, its revision counter
+    // or the IME fences: collapsing and recovering only ever change layout.
+    const keyboardAcquisition = React.useRef('')
+    React.useEffect(() => {
+      if (!human) { keyboardAcquisition.current = ''; return }
+      const identity = `${generation}:${control.leaseEpoch}`
+      if (keyboardAcquisition.current === identity) return
+      keyboardAcquisition.current = identity
+      if (coarsePointer()) setKeyboardOpen(true)
+    }, [human, generation, control.leaseEpoch])
     const refresh = async (signal?: AbortSignal) => {
       // The control status and the passive spaces/membership read are separate
       // channels: they are issued together but settle independently, and
@@ -580,8 +608,18 @@ export function applyRc2(ctx: ClientContext): void {
         button('读取网页到主对话', () => submitPage(false), '已提交网页上下文；等候主对话处理。', !targetId),
         button('完成并提交继续', () => submitPage(true),
           '继续请求已提交；接收回执不代表 Agent 已读取或恢复同一轮。', !human),
-        h('select', { value: mode, 'aria-label': '主对话提交方式', disabled: busy, onChange: (event: any) => setMode(event.target.value) },
-          h('option', { value: 'queue' }, '排队提交'), h('option', { value: 'steer' }, '当前轮引导'))),
+        // The rarely-changed submit mode lives behind one collapsed details;
+        // queue stays the default. While the non-default steer mode is
+        // selected, the marker below stays visible outside the details so
+        // closing them can never obscure the changed submission behavior.
+        h('details', { className: 'dsh-ego-rc2-more' },
+          h('summary', null, '更多选项'),
+          h('div', { className: 'dsh-ego-rc2-mode-row' },
+            h('label', null, '提交方式',
+              h('select', { value: mode, 'aria-label': '主对话提交方式', disabled: busy, onChange: (event: any) => setMode(event.target.value) },
+                h('option', { value: 'queue' }, '排队提交'), h('option', { value: 'steer' }, '当前轮引导')))),
+          h('small', null, '排队提交（默认）：先排队，等 Agent 当前工作完成后处理；当前轮引导：尽快插入当前正在进行的这一轮。'))),
+      mode === 'steer' ? h('small', { className: 'dsh-ego-rc2-mode-status' }, '提交方式：当前轮引导（在更多选项中可改回）') : null,
       h('div', { role: 'status' }, `${message} 控制状态：${control.state}${control.state === 'human' && !held ? '（另一设备持有控制）' : ''}`),
       h('div', { className: 'dsh-ego-rc2-targets' }, targets.map((target: Target) => h('button', {
         key: target.targetId, type: 'button', 'aria-pressed': targetId === target.targetId,
@@ -605,23 +643,36 @@ export function applyRc2(ctx: ClientContext): void {
           if (xy) sendInput('mouseWheel', { ...xy, deltaX: event.deltaX, deltaY: event.deltaY, modifiers: inputModifiers(event) })
         },
       })),
-      h('div', { className: 'dsh-ego-rc2-draft' },
-        h('textarea', { ref: keyboard, className: 'dsh-ego-rc2-keyboard', 'aria-label': '网页输入草稿', disabled: !human,
-          value: draft, maxLength: DRAFT_TEXT_LIMIT,
-          onChange: (event: any) => editDraft(String(event.target.value).slice(0, DRAFT_TEXT_LIMIT)),
-          onCompositionStart: () => setComposingFlag(true),
-          onCompositionEnd: () => setComposingFlag(false),
-          placeholder: '先点网页中的目标输入框，再在此输入文字（支持中文），然后点“输入到网页”。',
-          onBlur: () => { setComposingFlag(false); void flushInput().catch(() => notice('键盘释放未确认；请重新确认接管状态。')) },
-        }),
-        h('div', { className: 'dsh-ego-rc2-draft-actions' },
-          h('button', { type: 'button', disabled: busy || sending || !human || draft === '' || composing,
-            onClick: () => { void sendDraft() } }, sending ? '发送中…' : '输入到网页'),
-          specialKey('回车', 'Enter', 'Enter', 13), specialKey('退格', 'Backspace', 'Backspace', 8),
-          specialKey('Tab', 'Tab', 'Tab', 9), specialKey('Esc', 'Escape', 'Escape', 27))),
+      // Progressive disclosure: the remote keyboard exists only for THIS
+      // visible tab's own proven human holder — idle, Agent-running,
+      // other-device and disconnected states show no keyboard chrome. A
+      // proven holder sees one small 键盘输入 toggle; the editor behind it
+      // starts collapsed on desktop and expands once per coarse-pointer
+      // acquisition. The textarea and every fence stay mounted in all states,
+      // so a toggle, a lost takeover or a channel pause never touches the
+      // draft value, its revision counter or its page identity: recovered
+      // control restores the editor with its draft and never re-inserts text,
+      // and collapsing during an active composition sends nothing.
+      h('div', { className: 'dsh-ego-rc2-draft', hidden: !human },
+        h('button', { type: 'button', className: 'dsh-ego-rc2-keyboard-toggle', 'aria-expanded': keyboardOpen,
+          'aria-controls': keyboardPanelId, onClick: () => setKeyboardOpen((open: boolean) => !open) }, '键盘输入'),
+        h('div', { id: keyboardPanelId, className: 'dsh-ego-rc2-keyboard-panel', hidden: !keyboardOpen },
+          h('textarea', { ref: keyboard, className: 'dsh-ego-rc2-keyboard', 'aria-label': '网页输入草稿', disabled: !human,
+            value: draft, maxLength: DRAFT_TEXT_LIMIT,
+            onChange: (event: any) => editDraft(String(event.target.value).slice(0, DRAFT_TEXT_LIMIT)),
+            onCompositionStart: () => setComposingFlag(true),
+            onCompositionEnd: () => setComposingFlag(false),
+            placeholder: '先点网页中的目标输入框，再在此输入文字（支持中文），然后点“输入到网页”。',
+            onBlur: () => { setComposingFlag(false); void flushInput().catch(() => notice('键盘释放未确认；请重新确认接管状态。')) },
+          }),
+          h('div', { className: 'dsh-ego-rc2-draft-actions' },
+            h('button', { type: 'button', disabled: busy || sending || !human || draft === '' || composing,
+              onClick: () => { void sendDraft() } }, sending ? '发送中…' : '输入到网页'),
+            specialKey('回车', 'Enter', 'Enter', 13), specialKey('退格', 'Backspace', 'Backspace', 8),
+            specialKey('Tab', 'Tab', 'Tab', 9), specialKey('Esc', 'Escape', 'Escape', 27)))),
       h('details', { className: 'dsh-ego-rc2-help' },
         h('summary', null, '使用说明'),
-        h('small', null, '专用 Agent 浏览器。任务空间区分页签，不等于账号隔离。画面仅供观察；先点网页中的目标输入框，再用草稿和“输入到网页”或特殊键按钮操作；桌面端点击画面后，Ctrl+A、方向键等会直接作用于网页。读取与继续需明确提交。弹窗只接受本会话 opener 归属；真实账号 OAuth 尚未验收，系统浏览器登录导入与原生弹出仍关闭。')))
+        h('small', null, '专用 Agent 浏览器。任务空间区分页签，不等于账号隔离。画面仅供观察；接管后可用「键盘输入」开关展开草稿；先点网页中的目标输入框，再输入文字并用“输入到网页”或特殊键操作；桌面端点击画面后，Ctrl+A、方向键等会直接作用于网页。读取与继续需明确提交。弹窗只接受本会话 opener 归属；真实账号 OAuth 尚未验收，系统浏览器登录导入与原生弹出仍关闭。')))
   }
 
   const mount = (sidebarCtx: ClientContext) => {
@@ -633,10 +684,18 @@ export function applyRc2(ctx: ClientContext): void {
         .dsh-ego-rc2{height:100%;min-height:0;min-width:0;display:flex;flex-direction:column;gap:8px;padding:12px;box-sizing:border-box;overflow:auto;font:var(--dsw-font-s-14,14px/22px system-ui);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
         .dsh-ego-rc2 form,.dsh-ego-rc2-controls,.dsh-ego-rc2-targets,.dsh-ego-rc2-draft-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex-shrink:0;min-width:0;max-width:100%}
         .dsh-ego-rc2-draft{display:flex;flex-direction:column;gap:6px;flex-shrink:0;min-width:0}
+        /* Author-level hidden out-cascades every display rule here, so a
+         * collapsed panel or a non-human state truly removes the keyboard
+         * from layout and tab order while the textarea stays mounted. */
+        .dsh-ego-rc2 [hidden]{display:none}
+        /* The element qualifier out-cascades the shared .dsh-ego-rc2 button
+         * rule without touching it, exactly like the 16px textarea rule. */
+        .dsh-ego-rc2 button.dsh-ego-rc2-keyboard-toggle{width:fit-content;flex-shrink:0;font:var(--dsw-font-s-12,12px/18px system-ui);padding:2px 8px}
+        .dsh-ego-rc2-keyboard-panel{display:flex;flex-direction:column;gap:6px;flex-shrink:0;min-width:0}
         .dsh-ego-rc2 button,.dsh-ego-rc2 input,.dsh-ego-rc2 select,.dsh-ego-rc2 textarea{box-sizing:border-box;font:inherit;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:1px solid var(--dsw-alias-border-l3);border-radius:8px;padding:5px 9px;min-width:0;max-width:100%}
         .dsh-ego-rc2 button{cursor:pointer;white-space:normal;overflow-wrap:anywhere;text-align:start}
         .dsh-ego-rc2 button:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover-solid)}
-        .dsh-ego-rc2 button:not(:disabled):active,.dsh-ego-rc2 button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-active);border-color:var(--dsw-alias-state-business-primary)}
+        .dsh-ego-rc2 button:not(:disabled):active,.dsh-ego-rc2 button[aria-pressed=true],.dsh-ego-rc2-keyboard-toggle[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-active);border-color:var(--dsw-alias-state-business-primary)}
         .dsh-ego-rc2 :is(button,input,select,textarea):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
         .dsh-ego-rc2 :is(button,input,select,textarea):disabled{cursor:not-allowed;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform)}
         .dsh-ego-rc2 input::placeholder,.dsh-ego-rc2 textarea::placeholder{color:var(--dsw-alias-label-tertiary)}
@@ -654,6 +713,12 @@ export function applyRc2(ctx: ClientContext): void {
         .dsh-ego-rc2-help summary{cursor:pointer;width:fit-content}
         .dsh-ego-rc2-help summary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px;border-radius:2px}
         .dsh-ego-rc2-help small{display:block;margin-top:4px}
+        .dsh-ego-rc2-more{flex-shrink:0;color:var(--dsw-alias-label-secondary)}
+        .dsh-ego-rc2-more summary{cursor:pointer;width:fit-content}
+        .dsh-ego-rc2-more summary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px;border-radius:2px}
+        .dsh-ego-rc2-more small{display:block;margin-top:4px}
+        .dsh-ego-rc2-mode-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px}
+        .dsh-ego-rc2-mode-status{flex-shrink:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
       `
       document.head.appendChild(style)
       const dispose = sidebar.registerTab({

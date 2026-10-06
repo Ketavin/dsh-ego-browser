@@ -1,8 +1,9 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-remote.3` (the S3 remote candidate on the reviewed
-rc2.5 line; the S2 reviewed snapshot and the earlier `dsh-remote.1`/`.2`
-commits and packages stay recorded separately as historical evidence). Upstream v0.8.6 source base:
+Local version: `0.8.6-dsh-remote.5` (the S1 minimal-input candidate on the
+reviewed rc2.5 line; the S2 reviewed snapshot and the earlier
+`dsh-remote.1`–`.4` commits and packages stay recorded separately as
+historical evidence). Upstream v0.8.6 source base:
 `dfde57221443bdade5e0cbee7c773a6839ffe560`. This is a code adaptation of that
 source, not a declaration that upstream v0.8.6 supports rc.2. The reviewed Core
 is the local `0.1.1-rc.2` fork at `8de453b65df4f65e2b7857479eec538c8ccc6ee0`,
@@ -399,3 +400,26 @@ unrelated frames never trigger it, frames still grant no control authority
 semantics are untouched, and a stream recovery can never mask an
 independently failed authorization/control channel (the auth refusal and
 control-channel notices are not stream notices).
+
+The dsh-remote.5 follow-up (P3 S1) makes the watch panel disclose its input
+surface progressively instead of showing a placeholder keyboard. The whole
+remote-keyboard block renders only for the visible tab that itself holds
+proven human control (the same requester-bound receipt rule as before): idle,
+Agent-running, other-device and disconnected states show no keyboard chrome.
+For a proven holder the block collapses to a small 键盘输入 toggle with
+`aria-expanded`/`aria-controls` wiring — a desktop pointer starts collapsed,
+while a coarse-pointer (touch) acquisition expands it once per proof (a
+guarded `matchMedia('(pointer: coarse)')` layout hint only, never a device
+identity or authority fact). The textarea, its 16px declaration and every
+IME/authority fence stay mounted in every state: a collapse, expand, lost
+takeover or channel pause never touches the draft value, its revision counter
+or its page identity, so reacquired control recovers the draft without ever
+re-inserting it, and collapsing during an active composition sends nothing
+(the existing blur/compositionend fences remain authoritative). The
+submit-mode select moved into a default-collapsed 更多选项 details with a
+one-line queue/steer explanation; queue stays the default, and while the
+non-default 当前轮引导 mode is selected a small always-visible marker outside
+the details names it, so closing the details can never obscure a changed
+submission behavior. Button labels and reading/takeover/continuation
+semantics, the two-phase continuation, IME ordering, draft explicit-send and
+no-replay rules are unchanged, and no dependency or Core version moved.
