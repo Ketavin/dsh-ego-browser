@@ -284,7 +284,7 @@ async function main() {
     return 0;
   }
   if (argv[0] === "--stop") {
-    const stopped = await stopBrowser();
+    const stopped = await stopBrowser({ requireState: argv.includes('--require-state') });
     process.stdout.write(
       stopped
         ? "backing browser stopped; the next run launches a fresh one\n"

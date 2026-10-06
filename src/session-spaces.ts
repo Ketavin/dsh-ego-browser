@@ -14,7 +14,8 @@ export interface SessionSpace {
 
 /** Process-local ownership. A restart never adopts another host's old targets. */
 export class SessionSpaceRegistry {
-  readonly generation = randomUUID()
+  private currentGeneration = randomUUID()
+  get generation(): string { return this.currentGeneration }
   private bindings = new Map<string, SessionSpace>()
   private targetOwners = new Map<string, string>()
   private revoked = new Set<string>()
@@ -77,6 +78,10 @@ export class SessionSpaceRegistry {
     for (const id of binding.targets) this.targetOwners.delete(id)
     binding.targets.clear()
     binding.id = undefined
+  }
+  /** Only after a proven browser stop: old targets and all old requests are invalid. */
+  resetBrowser(): void {
+    this.bindings.clear(); this.targetOwners.clear(); this.currentGeneration = randomUUID()
   }
   revoke(sessionId: string): void {
     if (this.bindings.has(sessionId)) this.clear(sessionId)

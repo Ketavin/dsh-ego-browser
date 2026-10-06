@@ -43,7 +43,7 @@ describe('Host desktop request boundary', () => {
 
   it('guards every exact cast route and settings prefix before side effects', async () => {
     const { routes, fence, actions } = mount(403)
-    expect(routes).toHaveLength(25)
+    expect(routes).toHaveLength(26)
     for (const route of routes) {
       const req = { method: 'POST', headers: { cookie: 'dsh-auth-fake=1', 'content-type': 'application/json' } }
       const res = response()

@@ -144,6 +144,12 @@ export function safePageUrl(value: string): string {
   } catch { return '' }
 }
 
+/** A login hint only; it conveys no control or account identity. */
+export function isGoogleSignInUrl(value: string): boolean {
+  try { const url = new URL(value); return url.protocol === 'https:' && url.hostname === 'accounts.google.com' }
+  catch { return false }
+}
+
 export function pagePrompt(context: PageContext, continueAfterHuman = false): string {
   const clean = (value: unknown, limit: number): string => String(value ?? '')
     .replace(/https?:\/\/[^\s<>"']+/g, url => safePageUrl(url))

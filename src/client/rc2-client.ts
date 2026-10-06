@@ -1,13 +1,14 @@
 /** Isolated rc.2 Sidebar UI. Each mounted tab owns one immutable Session scope. */
 import {
   browserCoordinates, createConversationBridge, createInputDispatcher, createScopedTransport,
-  DRAFT_TEXT_LIMIT, inputModifiers, releaseHumanOnDispose, requireScope, safePageUrl,
+  DRAFT_TEXT_LIMIT, inputModifiers, isGoogleSignInUrl, releaseHumanOnDispose, requireScope, safePageUrl,
   type EgoScope, type JsonPayload, type Rc2Sessions,
 } from './rc2-bridge.ts'
+import { createDirectInputBridge } from './direct-input.ts'
 declare function require(id: string): any
 
 interface Target { targetId: string; url: string; title: string; viewportW?: number; viewportH?: number }
-interface Control { state: string; sessionId?: string; leaseEpoch: number; expiresAt?: number; held?: boolean }
+interface Control { state: string; sessionId?: string; leaseEpoch: number; expiresAt?: number; held?: boolean; recoveryRequired?: boolean; canRecover?: boolean }
 interface ClientContext {
   get?(name: string): any
   inject?(services: string[], callback: (ctx: ClientContext) => void): void
@@ -139,6 +140,7 @@ export function applyRc2(ctx: ClientContext): void {
     const [keyboardOpen, setKeyboardOpen] = React.useState(false)
     const keyboard = React.useRef(null as HTMLTextAreaElement | null)
     const image = React.useRef(null as HTMLImageElement | null)
+    const directInput = React.useRef(null as HTMLInputElement | null)
     const mounted = React.useRef(true)
     const pending = React.useRef(false)
     const submissionIntents = React.useRef(new Map<string, string>())
@@ -460,7 +462,7 @@ export function applyRc2(ctx: ClientContext): void {
     const action = async (run: () => Promise<unknown>, success: string) => {
       if (pending.current) return
       pending.current = true; setBusy(true)
-      try { await flushInput(); await run(); notice(success); await refresh() }
+      try { if (!live.current.control.recoveryRequired) await flushInput(); await run(); notice(success); await refresh() }
       catch (error) {
         const code = error instanceof Error ? error.message : 'browser-error'
         notice(code.startsWith('conversation-') && code.endsWith('-unconfirmed')
@@ -494,7 +496,12 @@ export function applyRc2(ctx: ClientContext): void {
         // would shift the layout between down and up and move the tapped
         // coordinates. A desktop click instead focuses the page keyboard
         // region itself, so Ctrl+A/arrows act on the page, never the draft.
-        if (event.pointerType === 'mouse') (event.currentTarget as HTMLElement).focus?.({ preventScroll: true })
+        if (event.pointerType === 'mouse' && directInput.current) {
+          const view = event.currentTarget.parentElement.getBoundingClientRect()
+          directInput.current.style.left = `${Math.max(0, Math.min(event.clientX - view.left, view.width - 2))}px`
+          directInput.current.style.top = `${Math.max(0, Math.min(event.clientY - view.top, view.height - 20))}px`
+          directInput.current.focus({ preventScroll: true })
+        }
       }
       if (type === 'mouseReleased') event.currentTarget.releasePointerCapture?.(event.pointerId)
       sendInput(type, { ...xy, button: event.button === 2 ? 'right' : event.button === 1 ? 'middle' : 'left',
@@ -513,6 +520,12 @@ export function applyRc2(ctx: ClientContext): void {
       sendInput(type, { key: String(event.key ?? ''), code: String(event.code ?? ''),
         windowsVirtualKeyCode: Number(event.keyCode) || 0, modifiers: inputModifiers(event) })
     }
+    const direct = React.useMemo(() => createDirectInputBridge(() => {
+      const now = live.current
+      return { active: mounted.current && now.visible && now.held && !!now.targetId && !pending.current,
+        identity: JSON.stringify([now.generation, now.targetId, now.control.leaseEpoch]) }
+    }, sendInput, () => { void flushInput().catch(() => notice('键盘释放未确认；请重新确认接管状态。')) }), [sessionId])
+    React.useEffect(() => { direct.reset(directInput.current) }, [generation, targetId, control.leaseEpoch, human])
     const sendDraft = async () => {
       if (pendingSend.current) return
       const text = draftRef.current
@@ -609,6 +622,9 @@ export function applyRc2(ctx: ClientContext): void {
       h('button', { type: 'submit', disabled: busy }, '打开')),
       h('div', { className: 'dsh-ego-rc2-controls' },
         button('停止本次运行并接管', takeOver, '接管状态已更新。', human || !generation),
+        control.canRecover ? button('恢复浏览器并接管', () => transport.post('/api/ego/control/recover', {
+          hostGeneration: generation, leaseEpoch: control.leaseEpoch,
+        }), '浏览器已恢复并接管；请重新打开网页，并核对被打断的操作是否已经生效。', !generation) : null,
         button('读取网页到主对话', () => submitPage(false), '已提交网页上下文；等候主对话处理。', !targetId),
         button('完成并提交继续', () => submitPage(true),
           '继续请求已提交；接收回执不代表 Agent 已读取或恢复同一轮。', !human),
@@ -624,7 +640,13 @@ export function applyRc2(ctx: ClientContext): void {
                 h('option', { value: 'queue' }, '排队提交'), h('option', { value: 'steer' }, '当前轮引导')))),
           h('small', null, '排队提交（默认）：先排队，等 Agent 当前工作完成后处理；当前轮引导：尽快插入当前正在进行的这一轮。'))),
       mode === 'steer' ? h('small', { className: 'dsh-ego-rc2-mode-status' }, '提交方式：当前轮引导（在更多选项中可改回）') : null,
-      h('div', { role: 'status' }, `${message} 控制状态：${control.state}${control.state === 'human' && !held ? '（另一设备持有控制）' : ''}`),
+      h('div', { role: 'status', title: message }, `${message} 控制状态：${control.state}${control.state === 'human' && !held ? '（另一设备持有控制）' : ''}`),
+      control.recoveryRequired ? h('details', { className: 'dsh-ego-rc2-help' },
+        h('summary', null, '恢复会关闭 Agent 浏览器旧页面'),
+        h('small', null, '旧操作的结果尚未确认。恢复会关闭专用 Agent 浏览器的所有页面，保留其登录资料；其他会话也需重新打开页面。恢复不会重做旧操作，继续 Agent 仍需明确提交。')) : null,
+      targets.some((target: Target) => target.targetId === targetId && isGoogleSignInUrl(target.url))
+        ? h('details', { className: 'dsh-ego-rc2-help' }, h('summary', null, 'Google 登录受限时可用邮箱验证码'),
+          h('small', null, 'Google 可能阻止受软件控制的浏览器。请返回网站选择邮箱验证码等登录方式；普通 Chrome 的登录状态不会自动同步到这里。')) : null,
       h('div', { className: 'dsh-ego-rc2-targets' }, targets.map((target: Target) => h('button', {
         key: target.targetId, type: 'button', 'aria-pressed': targetId === target.targetId,
         title: safePageUrl(target.url), disabled: busy, onClick: () => {
@@ -646,6 +668,11 @@ export function applyRc2(ctx: ClientContext): void {
           const xy = browserCoordinates(event, image.current.getBoundingClientRect(), size)
           if (xy) sendInput('mouseWheel', { ...xy, deltaX: event.deltaX, deltaY: event.deltaY, modifiers: inputModifiers(event) })
         },
+      }), h('input', { ref: directInput, type: 'text', className: 'dsh-ego-rc2-direct-input',
+        'aria-label': '直接输入网页（支持中文和粘贴）', autoComplete: 'off', autoCapitalize: 'off', spellCheck: false,
+        disabled: !human || !targetId || busy, maxLength: DRAFT_TEXT_LIMIT,
+        onInput: direct.onInput, onKeyDown: direct.onKeyDown, onKeyUp: direct.onKeyUp, onPaste: direct.onPaste,
+        onCompositionStart: direct.onCompositionStart, onCompositionEnd: direct.onCompositionEnd, onBlur: direct.onBlur,
       })),
       // Progressive disclosure: the remote keyboard exists only for THIS
       // visible tab's own proven human holder — idle, Agent-running,
@@ -676,7 +703,9 @@ export function applyRc2(ctx: ClientContext): void {
             specialKey('Tab', 'Tab', 'Tab', 9), specialKey('Esc', 'Escape', 'Escape', 27)))),
       h('details', { className: 'dsh-ego-rc2-help' },
         h('summary', null, '使用说明'),
-        h('small', null, '专用 Agent 浏览器。任务空间区分页签，不等于账号隔离。画面仅供观察；接管后可用「键盘输入」开关展开草稿；先点网页中的目标输入框，再输入文字并用“输入到网页”或特殊键操作；桌面端点击画面后，Ctrl+A、方向键等会直接作用于网页。读取与继续需明确提交。弹窗只接受本会话 opener 归属；真实账号 OAuth 尚未验收，系统浏览器登录导入与原生弹出仍关闭。')))
+        h('small', null, '接管后，桌面端点击网页输入框即可直接打字、使用中文输入法或粘贴；手机可展开“键盘输入”草稿。Ctrl+A、方向键等作用于网页。读取与继续需明确提交。任务空间区分页签，不等于账号隔离。'),
+        h('small', null, 'Google 可能拒绝受软件控制的浏览器登录。如果出现“浏览器不安全”，请返回网站使用邮箱验证码等登录方式。普通 Chrome 登录不会自动同步到此浏览器。'),
+        h('a', { href: 'https://support.google.com/accounts/answer/7675428?hl=zh-Hans', target: '_blank', rel: 'noopener noreferrer' }, 'Google 官方登录说明')))
   }
 
   const mount = (sidebarCtx: ClientContext) => {
@@ -685,7 +714,7 @@ export function applyRc2(ctx: ClientContext): void {
     sidebarCtx.effect(() => {
       const style = document.createElement('style')
       style.textContent = `
-        .dsh-ego-rc2{height:100%;min-height:0;min-width:0;display:flex;flex-direction:column;gap:8px;padding:12px;box-sizing:border-box;overflow:auto;font:var(--dsw-font-s-14,14px/22px system-ui);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
+        .dsh-ego-rc2{height:100%;min-height:0;min-width:0;display:flex;flex-direction:column;gap:4px;padding:6px;box-sizing:border-box;overflow:auto;font:var(--dsw-font-s-14,14px/22px system-ui);color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base)}
         .dsh-ego-rc2 form,.dsh-ego-rc2-controls,.dsh-ego-rc2-targets,.dsh-ego-rc2-draft-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex-shrink:0;min-width:0;max-width:100%}
         .dsh-ego-rc2-draft{display:flex;flex-direction:column;gap:6px;flex-shrink:0;min-width:0}
         /* Author-level hidden out-cascades every display rule here, so a
@@ -703,9 +732,15 @@ export function applyRc2(ctx: ClientContext): void {
         .dsh-ego-rc2 :is(button,input,select,textarea):focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
         .dsh-ego-rc2 :is(button,input,select,textarea):disabled{cursor:not-allowed;color:var(--dsw-alias-label-tertiary);background:var(--dsw-alias-bg-module-platform)}
         .dsh-ego-rc2 input::placeholder,.dsh-ego-rc2 textarea::placeholder{color:var(--dsw-alias-label-tertiary)}
-        .dsh-ego-rc2 form input{flex:1 1 200px}
-        .dsh-ego-rc2 [role=status]{flex-shrink:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary)}
-        .dsh-ego-rc2-view{flex:1;min-height:80px;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-module-platform);border-radius:8px}
+        .dsh-ego-rc2 form{flex-wrap:nowrap}
+        .dsh-ego-rc2 form input{flex:1 1 0;min-width:0}
+        .dsh-ego-rc2-controls{flex-wrap:nowrap;overflow-x:auto}
+        .dsh-ego-rc2-controls>button,.dsh-ego-rc2-controls>details{white-space:nowrap;flex-shrink:0}
+        .dsh-ego-rc2-targets{flex-wrap:nowrap;overflow-x:auto}
+        .dsh-ego-rc2-targets button{max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
+        .dsh-ego-rc2 [role=status]{flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font:var(--dsw-font-s-12,12px/18px system-ui);color:var(--dsw-alias-label-secondary)}
+        .dsh-ego-rc2-view{position:relative;flex:1 1 0;min-height:120px;min-width:0;overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-module-platform);border-radius:8px}
+        .dsh-ego-rc2 input.dsh-ego-rc2-direct-input{position:absolute;left:0;top:0;width:2px;height:18px;padding:0;border:0;opacity:0.01;pointer-events:none;font-size:16px;resize:none}
         .dsh-ego-rc2-view img{width:100%;height:100%;object-fit:contain;touch-action:none}
         .dsh-ego-rc2-view img:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
         /* At least 16px so focusing the draft never triggers the mobile input

@@ -2,6 +2,64 @@ import { describe, expect, it, vi } from 'vitest'
 import { ControlLease } from '../src/control-lease.ts'
 
 describe('shared browser control lease', () => {
+  it('recovers only after old work settles and the transport reset is proven, with new device/epoch fences', async () => {
+    const lease = new ControlLease(), abort = new AbortController()
+    let finish!: () => void, stopped!: () => void
+    const work = lease.runAgent('A', abort.signal, () => new Promise<void>(resolve => { finish = resolve }))
+    await Promise.resolve(); abort.abort()
+    const old = lease.status('A').leaseEpoch
+    const reset = vi.fn(() => new Promise<void>(resolve => { stopped = resolve }))
+    await expect(lease.recover('B', old, 'b', reset)).rejects.toThrow('lease-not-owned')
+    await expect(lease.recover('A', old - 1, 'a', reset)).rejects.toThrow('lease-epoch-stale')
+    const recovery = lease.recover('A', old, 'a', reset)
+    expect(lease.status('A').state).toBe('recovering')
+    expect(reset).not.toHaveBeenCalled()
+    await expect(lease.takeOver('A')).rejects.toThrow('control-busy')
+    finish(); await work
+    await vi.waitFor(() => expect(reset).toHaveBeenCalledOnce())
+    expect(() => lease.assertHuman('A', old, 'a')).toThrow('lease-not-owned')
+    await expect(lease.runAgent('A', undefined, async () => {})).rejects.toThrow('agent-control-blocked')
+    stopped(); const human = await recovery
+    expect(human.state).toBe('human'); expect(human.recoveryRequired).toBe(false)
+    expect(lease.heldBy('A', 'a')).toBe(true)
+    expect(() => lease.assertHuman('A', human.leaseEpoch, 'b')).toThrow('lease-holder-mismatch')
+    lease.assertHuman('A', human.leaseEpoch, 'a')
+    const paused = lease.release('A', human.leaseEpoch, 'a')
+    lease.arm('A', paused.leaseEpoch, 'a')
+    await lease.runAgent('A', undefined, async () => {})
+  })
+  it('keeps the fuse after a failed reset or unfinished old work and allows an explicit retry', async () => {
+    const lease = new ControlLease()
+    await expect(lease.runAgent('A', undefined, async () => { throw Error('unknown') })).rejects.toThrow('unknown')
+    const reset = vi.fn(async () => { throw Error('stop not proven') })
+    await expect(lease.recover('A', lease.status('A').leaseEpoch, 'a', reset)).rejects.toThrow('stop not proven')
+    expect(lease.status('A')).toMatchObject({ state: 'paused', recoveryRequired: true })
+    expect(() => lease.arm('A', lease.status('A').leaseEpoch)).toThrow('cancellation-unverified')
+    await lease.recover('A', lease.status('A').leaseEpoch, 'a', async () => {})
+    expect(lease.status('A').state).toBe('human')
+    const blocked = new ControlLease(), abort = new AbortController()
+    let finish!: () => void
+    const work = blocked.runAgent('A', abort.signal, () => new Promise<void>(resolve => { finish = resolve }))
+    await Promise.resolve(); abort.abort()
+    const untouched = vi.fn(async () => {})
+    await expect(blocked.recover('A', blocked.status('A').leaseEpoch, 'a', untouched, false, 5)).rejects.toThrow('recovery-drain-timeout')
+    expect(untouched).not.toHaveBeenCalled()
+    finish(); await work
+    expect(blocked.status('A').recoveryRequired).toBe(true)
+  })
+  it('never grants an obsolete recovery after session revocation or plugin disposal', async () => {
+    const lease = new ControlLease()
+    lease.revoke('unused')
+    await expect(lease.runAgent('A', undefined, async () => { throw Error('unknown') })).rejects.toThrow()
+    let finish!: () => void
+    const recovery = lease.recover('A', lease.status('A').leaseEpoch, 'a', () => new Promise<void>(resolve => { finish = resolve }))
+    const refused = expect(recovery).rejects.toThrow('recovery-obsolete')
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    const disposal = lease.dispose()
+    finish(); await refused; await disposal
+    expect(lease.status('A').state).toBe('paused')
+    await expect(lease.takeOver('A')).rejects.toThrow('control-disposed')
+  })
   it('holds human control across asynchronous input and rejects agent/foreign/old epoch actions', async () => {
     const lease = new ControlLease()
     const human = await lease.takeOver('A')

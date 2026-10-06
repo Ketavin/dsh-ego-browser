@@ -836,13 +836,17 @@ async function waitForProcessExit(pid, timeoutMs = 5000) {
 }
 
 /** Terminate the backing browser and forget it. */
-export async function stopBrowser() {
+export async function stopBrowser({ requireState = false } = {}) {
   const state = await readBrowserState();
+  if (requireState && !state) throw new Error('runtime-state-ownership-unverified');
   let stopped = false;
 
   if (state && process.env.DSH_EGO_SCOPED_WORKER === '1') {
     const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
-    if (ownership === 'absent') { await rm(BROWSER_STATE_FILE, { force: true }); return false; }
+    if (ownership === 'absent') {
+      if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
+      await rm(BROWSER_STATE_FILE, { force: true }); return false;
+    }
     if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
     const wsUrl = state.port ? await probe(state.port) : null;
     if (wsUrl && wsUrl !== state.wsUrl) throw new Error('runtime-endpoint-ownership-unverified');
@@ -858,7 +862,10 @@ export async function stopBrowser() {
   if (!stopped && state?.pid) {
     if (process.env.DSH_EGO_SCOPED_WORKER === '1') {
       const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
-      if (ownership === 'absent') { await rm(BROWSER_STATE_FILE, { force: true }); return false; }
+      if (ownership === 'absent') {
+        if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
+        await rm(BROWSER_STATE_FILE, { force: true }); return false;
+      }
       if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
     }
     try {
@@ -879,6 +886,12 @@ export async function stopBrowser() {
     }
   }
 
+  if (process.env.DSH_EGO_SCOPED_WORKER === '1' && state) {
+    // A sent SIGTERM is not a stop receipt. Preserve the identity/state/lock
+    // on uncertainty so a subsequent recovery cannot adopt a live old browser.
+    if (state.pid && !(await waitForProcessExit(state.pid, 5000))) throw new Error('runtime-stop-unverified');
+    if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
+  }
   await rm(BROWSER_STATE_FILE, { force: true });
   // A SIGTERMed Chrome does not always release its profile lock, which would
   // block the next launch. After a graceful close there is nothing left to

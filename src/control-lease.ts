@@ -1,6 +1,6 @@
 import { ScopeError } from './session-spaces.ts'
 
-export type ControlState = 'idle' | 'agent' | 'requesting-human' | 'human' | 'paused' | 'armed'
+export type ControlState = 'idle' | 'agent' | 'requesting-human' | 'recovering' | 'human' | 'paused' | 'armed'
 /** Global browser lease: all plugin tools, UI operations and human input share it. */
 export class ControlLease {
   private state: ControlState = 'idle'
@@ -27,8 +27,10 @@ export class ControlLease {
   }
   status(sessionId: string) {
     this.expire()
-    return { state: this.state, sessionId: this.sessionId === sessionId ? sessionId : null, leaseEpoch: this.epoch, owned: this.sessionId === sessionId, expiresAt: this.state === 'human' ? this.expiresAt : null }
+    return { state: this.state, sessionId: this.sessionId === sessionId ? sessionId : null, leaseEpoch: this.epoch, owned: this.sessionId === sessionId, recoveryRequired: this.state === 'paused' && this.unsafePause, expiresAt: this.state === 'human' ? this.expiresAt : null }
   }
+  /** Host-only owner check; the identity is never included in a foreign status reply. */
+  ownerSession(): string | undefined { return this.sessionId }
   private owned(sessionId: string, epoch: unknown, holder?: string): void {
     if (this.disposed) throw new ScopeError('control-disposed')
     this.expire()
@@ -158,9 +160,45 @@ export class ControlLease {
     if (this.state === 'paused' && this.unsafePause) return
     this.state = 'paused'; this.unsafePause = true; this.armAllowed = false; this.holder = undefined; this.epoch++
   }
+  /**
+   * Explicit recovery is a transport reset, never a claim that an interrupted
+   * webpage action did not happen. reset MUST prove the old browser is gone.
+   * Only the Host may permit replacing a disposed session's global lease.
+   */
+  async recover(sessionId: string, epoch: unknown, holder: string, reset: () => Promise<void>, replaceDisposedOwner = false, timeoutMs = 5000) {
+    if (this.disposed) throw new ScopeError('control-disposed')
+    if (epoch !== this.epoch) throw new ScopeError('lease-epoch-stale')
+    if (this.sessionId !== sessionId && !replaceDisposedOwner) throw new ScopeError('lease-not-owned')
+    if (!this.holderMatches(holder)) throw new ScopeError('lease-holder-mismatch')
+    if (this.state !== 'paused' || !this.unsafePause) throw new ScopeError('recovery-state-invalid')
+    this.state = 'recovering'; this.armAllowed = false
+    const recoveryEpoch = ++this.epoch
+    this.controller?.abort(new Error('browser recovery requested'))
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([Promise.allSettled([this.inFlight, this.humanChain]), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new ScopeError('recovery-drain-timeout')), timeoutMs)
+      })])
+      if (timer) clearTimeout(timer)
+      if (this.disposed || this.epoch !== recoveryEpoch) throw new ScopeError('recovery-obsolete')
+      const flight = Promise.resolve().then(reset)
+      this.inFlight = flight
+      try { await flight }
+      finally { if (this.inFlight === flight) this.inFlight = undefined }
+      if (this.disposed || this.epoch !== recoveryEpoch) throw new ScopeError('recovery-obsolete')
+      this.requests.clear(); this.heldInputs.clear(); this.inputWatermark = undefined
+      this.unsafePause = false; this.sessionId = sessionId; this.holder = holder
+      this.state = 'human'; this.expiresAt = this.now() + this.ttlMs; this.epoch++
+      return this.status(sessionId)
+    } catch (error) {
+      if (this.epoch === recoveryEpoch) { this.state = 'paused'; this.unsafePause = true; this.holder = undefined; this.epoch++ }
+      throw error
+    } finally { if (timer) clearTimeout(timer) }
+  }
   async takeOver(sessionId: string, timeoutMs = 5000, holder?: string) {
     if (this.disposed) throw new ScopeError('control-disposed')
     this.expire()
+    if (this.state === 'recovering' || this.state === 'requesting-human') throw new ScopeError('control-busy')
     if (this.sessionId !== undefined && this.sessionId !== sessionId) throw new ScopeError('lease-not-owned')
     if (this.state === 'human') {
       // Another device of the same person/session may not grab or share the lease.
