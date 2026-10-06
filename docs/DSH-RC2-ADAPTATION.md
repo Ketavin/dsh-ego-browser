@@ -1,6 +1,6 @@
 # Reviewed DSH rc.2 isolation candidate
 
-Local version: `0.8.6-dsh-remote.5` (the S1 minimal-input candidate on the
+Local version: `0.8.6-dsh-remote.6` (the auto-reveal correction on the
 reviewed rc2.5 line; the S2 reviewed snapshot and the earlier
 `dsh-remote.1`–`.4` commits and packages stay recorded separately as
 historical evidence). Upstream v0.8.6 source base:
@@ -17,6 +17,12 @@ preserving both tab lifecycles. Ego registers only `ego-browser:watch`; there is
 no floating ball or second Browser rail icon. The old upstream README, ARCH.md
 and legacy JavaScript describe a different runtime. Current TypeScript and
 this adaptation note are authoritative for the local candidate.
+
+Automatic tool opens require `betterSidebar.getSnapshot().prefs.agentOpenTools`
+to be true. Live Ego metadata opens `ego-browser:watch` with `reveal: true`;
+Better Sidebar 0.17.9 reveals only the active session's actual hosting panel
+and keeps inactive-session opens collapsed. No history is loaded for this
+notification, and no human control or navigation is acquired by revealing it.
 
 ## Runtime and request boundary
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-ego-browser",
-  "version": "0.8.6-dsh-remote.5",
+  "version": "0.8.6-dsh-remote.6",
   "description": "Isolated adaptation of upstream Ego Browser v0.8.6 for the reviewed DSH rc.2 fork: 25 scoped tools, Better Sidebar Browser mode, explicit human control, main Conversation continuation gate, and optional single-owner Cloudflare Access remote watching (see docs/DSH-REMOTE-ACCESS.md). Production Profile and OAuth acceptance remain separate gates.",
   "type": "module",
   "main": "./lib/index.js",

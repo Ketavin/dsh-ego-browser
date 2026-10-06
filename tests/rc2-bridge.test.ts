@@ -139,18 +139,30 @@ describe('cold background Session metadata auto-open', () => {
       streams.push(source)
       return { close: source.close, addEventListener: (_name: string, fn: any) => { source.event = fn } } as any
     }
-    const sidebar = { isTabEnabled: vi.fn(() => true), openTab: vi.fn() }
+    const prefs = { agentOpenTools: true }
+    const sidebar = { isTabEnabled: vi.fn(() => true), openTab: vi.fn(), getSnapshot: () => ({ sessionId: 'a', prefs }) }
     const dispose = subscribeAutoOpen(sessions, sidebar, connect)
     const event = (source: number, body: unknown) => streams[source].event!({ data: JSON.stringify(body) })
-    return { snapshot, binding, streams, sidebar, dispose, reconcile: () => reconcile(), event }
+    return { snapshot, binding, streams, sidebar, prefs, dispose, reconcile: () => reconcile(), event }
   }
   it('opens a calling cold background session once without selecting or loading history', () => {
     const f = feed()
     expect(new URL(f.streams[0].url, 'http://fixture').searchParams.get('sessionIds')).toBe('["a","b"]')
     f.event(0, { sessionId: 'b', hostGeneration: 'host-1', count: 1 })
     f.event(0, { sessionId: 'b', hostGeneration: 'host-1', count: 2 })
-    expect(f.sidebar.openTab).toHaveBeenCalledExactlyOnceWith({ type: 'ego-browser:watch' }, { sessionId: 'b' })
+    expect(f.sidebar.openTab).toHaveBeenCalledExactlyOnceWith({ type: 'ego-browser:watch', reveal: true }, { sessionId: 'b' })
     expect(f.binding).not.toHaveBeenCalled(); f.dispose(); expect(f.streams[0].close).toHaveBeenCalledTimes(1)
+  })
+  it('requests current-session reveal once and never overrides a disabled auto-open preference', () => {
+    const f = feed()
+    f.prefs.agentOpenTools = false
+    f.event(0, { sessionId: 'a', hostGeneration: 'host-1', count: 1 })
+    expect(f.sidebar.openTab).not.toHaveBeenCalled()
+    f.prefs.agentOpenTools = true
+    f.event(0, { sessionId: 'a', hostGeneration: 'host-1', count: 2 })
+    f.event(0, { sessionId: 'a', hostGeneration: 'host-1', count: 3 })
+    expect(f.sidebar.openTab).toHaveBeenCalledExactlyOnceWith({ type: 'ego-browser:watch', reveal: true }, { sessionId: 'a' })
+    f.dispose()
   })
   it('rejects other scopes, disabled modes, stale sources and inactive rows', () => {
     const f = feed()

@@ -42,7 +42,11 @@ export function subscribeAutoOpen(sessions: any, sidebar: any,
           || !Number.isSafeInteger(data.count) || data.count < 1 || opened.has(identity)
           || sessions.list.getSnapshot().byId[data.sessionId]?.running !== true
           || sidebar.isTabEnabled('ego-browser:watch') !== true) return
-        sidebar.openTab({ type: 'ego-browser:watch' }, { sessionId: data.sessionId })
+        // Keep background sessions cold and respect the existing tool-open
+        // preference. Sidebar reveals only the current session's landing pane.
+        const snapshot = sidebar.getSnapshot?.()
+        if (snapshot?.prefs?.agentOpenTools !== true) return
+        sidebar.openTab({ type: 'ego-browser:watch', reveal: true }, { sessionId: data.sessionId })
         opened.add(identity)
       } catch { /* malformed metadata never changes a Session selection */ }
     })
