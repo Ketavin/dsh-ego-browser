@@ -1,0 +1,48 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "round": "S2 attempt7 mobile composition/shortcuts/scope repair (REVIEW-S2-MOBILE-R7)",
+  "date": "2026-10-04",
+  "node_path_workaround_child_only": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules",
+  "head": "22a229245ec336fb4a132e88e312221575b5d5b8 (unchanged, no reset/clean/commit/push)",
+  "version": "0.8.6-dsh-rc2.5 (unchanged; version/publishing is s3)",
+  "gaps_fixed_from_codex_mobile_r6_extended_8case_run": [
+    "IME composition: compositionstart now disables and the click handler refuses 输入到网页 while a composition is active (admission guard), so no partial candidate text, remote Enter or duplicate final input is transmitted; commit/cancel end at compositionend with the native value final; blur (focusout) and a real page/Host change reset the composing flag (never stuck, never carried to a new target); draft selection/Ctrl+A/paste/Backspace/Enter stay local; draft font-size 16px avoids mobile input zoom; no Safari/version sniffing",
+    "Desktop page shortcuts: the frame image is a focusable page keyboard region (tabIndex 0, aria-label); a mouse click focuses the region instead of the draft editor, and Ctrl+A/arrows/Enter there send one ordered keyDown/keyUp pair with modifiers (inputModifiers, ctrl=2); Tab keeps its focus default with the blur flush releasing an unpaired down; draft-focused keys are never remote; viewer/epoch/target/generation fences unchanged via sendInput; reserved browser/OS shortcuts not guaranteed; no clipboard sync claimed — paste edits the local draft and only an explicit send transmits",
+    "Draft scope: the tracker keeps the LAST VALID target/generation (empty wipe values no longer overwrite it); same-context recovery preserves the quarantined draft and never auto-sends; a genuinely different proven Host generation/target/session clears draft+composition with a concise notice (原草稿已清空); revision-counter protection still ignores old pending completions; no old Host operation or text replays onto the new Host"
+  ],
+  "typecheck": { "command": "npm run typecheck", "exit": 0, "configs": ["tsconfig.json", "tsconfig.client.json"] },
+  "full_plugin_suite": {
+    "command": "NODE_PATH=<child-only sidebar node_modules> npx vitest run (cwd ego)",
+    "test_files": "36 passed | 1 skipped (37)",
+    "tests": "323 passed | 0 failed | 5 skipped (328)",
+    "skips_are_infra": "tests/login-import-e2e.test.ts (5 tests) skip without a real Chrome/profile environment; unchanged from prior rounds",
+    "delta_vs_r6": "+4 regressions in tests/rc2-client-lifecycle.test.ts (composition guard/commit/cancel, blur unstick, page-region vs draft keys with modifiers, auth-gap -> new Host with ignored old pending reply); 23 -> 27 in file (319 -> 323 total); the mouse-focus assertion in the touch test updated from draft textarea to the page keyboard region per the new behavior"
+  },
+  "codex_suites_read_only_unmodified": {
+    "slow_refresh": { "config": "p3-remote/verification/s2/codex-slow-refresh.config.ts", "tests": "1 passed | 0 failed (1)" },
+    "extension_seams": { "config": "p3-remote/verification/s2/codex-extension-seams.config.ts", "tests": "2 passed | 0 failed (2)" },
+    "all_boundaries": { "config": "p3-remote/verification/s2/codex-all-boundaries.config.ts", "tests": "11 passed | 0 failed (11)" },
+    "device_cache": { "config": "p3-remote/verification/s2/codex-device-cache.config.ts", "tests": "4 passed | 0 failed (4)" },
+    "final_boundaries": { "config": "p3-remote/verification/s2/codex-final-boundaries.config.ts", "tests": "14 passed | 0 failed (14)" },
+    "mobile_independent": {
+      "config": "p3-remote/verification/s2/codex-mobile-independent.config.ts",
+      "tests": "8 passed | 0 failed (8)",
+      "note": "the extended 8-case root suite rerun unchanged after the repairs; it was 5/8 before (composition send enabled, no remote Ctrl+A after frame click, old-Host draft surviving recovery)"
+    }
+  },
+  "build": { "command": "npm run build", "exit": 0 },
+  "nul_byte_scan": "0 NUL bytes in src/client/rc2-client.ts, tests/rc2-client-lifecycle.test.ts, lib/client.js, lib/index.js",
+  "changed_this_round": [
+    "src/client/rc2-client.ts (composition tracking + send admission guard, page keyboard region on the frame image with mouse-focus change, last-valid draft scope tracker with concise clear notice, 16px draft font, small-print scope note)",
+    "tests/rc2-client-lifecycle.test.ts (+4 regressions, key/blur helpers, mouse-focus assertion updated)",
+    "docs/DSH-RC2-ADAPTATION.md (R7 paragraph with corrected Canary/OAuth status wording)",
+    "verification-own/s2-mobile-r7-results.json",
+    "lib/ build artifacts"
+  ],
+  "status_corrections_vs_r6_results": "verification-own/s2-mobile-r6-results.json is preserved unedited, but its not_run wording 'Canary plan UNAPPROVED/NOT ACTIVE' was inaccurate: the prior original public Canary IS approved and active (old installed bytes) with physical frame/same-chat takeover/mutual-exclusion evidence; the actual failing item is user-reported iPhone Chinese input, so Chinese acceptance remains NOT PASSED. This R7 mobile code has NOT been publicly activated or physically validated. The old source clearing mechanism is confirmed; no native iPhone event/focus trace establishes its complete physical cause. Real provider OAuth remains NOT RUN.",
+  "not_run": [
+    "REAL iPhone / iOS Safari IME verification NOT RUN — all mobile evidence remains controlled jsdom/React and exported-function testing; native device acceptance (including composition, 16px zoom behavior and touch taps on real hardware) belongs to Codex/human physical testing",
+    "public activation of this new mobile candidate",
+    "real provider OAuth/login import, actual accounts"
+  ]
+}

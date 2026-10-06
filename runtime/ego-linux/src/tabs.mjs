@@ -52,14 +52,16 @@ export function createTabsApi(cdp, { port, getScope }) {
       const scope = getScope ? await getScope() : null;
       if (scope) {
         const scoped = pages.filter((target) =>
-          scope.browserContextId
+          scope.browserContextId && process.env.DSH_EGO_SCOPED_WORKER !== '1'
             ? target.browserContextId === scope.browserContextId
             : scope.targetIds.has(target.targetId),
         );
         // Never hand back an empty list: a space mid-navigation, or one whose
         // only tab the user just closed, must not look like a browser with no
         // tabs at all.
-        if (scoped.length > 0) pages = scoped;
+        if (scoped.length > 0 || process.env.DSH_EGO_SCOPED_WORKER === '1') pages = scoped;
+      } else if (process.env.DSH_EGO_SCOPED_WORKER === '1') {
+        throw new Error('scoped task space required');
       }
 
       const order = await mruOrder();

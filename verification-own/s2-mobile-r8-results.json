@@ -1,0 +1,33 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "round": "S2 attempt8 draft font cascade correction (REVIEW-S2-MOBILE-R8)",
+  "date": "2026-10-04",
+  "node_path_workaround_child_only": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules",
+  "head": "22a229245ec336fb4a132e88e312221575b5d5b8 (unchanged, no reset/clean/commit/push)",
+  "version": "0.8.6-dsh-rc2.5 (unchanged; version/publishing is s3)",
+  "finding": "Codex's CUA-loaded local candidate measured the 网页输入草稿 textarea at computed font-size 14px despite the R7 16px claim: the shared `.dsh-ego-rc2 textarea{font:inherit}` rule (specificity 0,1,1) out-ranks `.dsh-ego-rc2-keyboard` (0,1,0), so the 16px declaration lost the cascade in the real loaded UI.",
+  "fix": "CSS-only: the draft rule's selector is now `.dsh-ego-rc2 textarea.dsh-ego-rc2-keyboard` (0,2,1), which out-cascades the shared rule while remaining scoped to exactly the draft textarea. No !important, no blanket or global theme change; theme colors, bounds, widths and all input behavior untouched. A first edit accidentally placed backticks inside the CSS template literal (TS1005); removed and rebuilt.",
+  "commands_and_outputs": {
+    "typecheck": { "command": "npm run typecheck", "exit": 0, "note": "initial backtick edit failed TS1005 before the corrected rebuild" },
+    "build": { "command": "npm run build", "exit": 0 },
+    "built_rule_check": "lib/client.js verified to contain `.dsh-ego-rc2 textarea.dsh-ego-rc2-keyboard{...font-size:16px}`; 0 NUL bytes in lib/client.js",
+    "mobile_root_config": {
+      "command": "NODE_PATH=<child-only> npx vitest run --config p3-remote/verification/s2/codex-mobile-independent.config.ts (cwd ego)",
+      "tests": "8 passed | 0 failed (8)",
+      "note": "rerun unchanged after the CSS-only change"
+    },
+    "full_suite_not_repeated": "no full 328-test repetition: the change is a single style-template selector with no functional code change (per R8 instruction); last independent full results remain Codex's 323 passed / 5 infra skips plus boundary configs 1/2/11/4/14 green"
+  },
+  "changed_this_round": [
+    "src/client/rc2-client.ts (one CSS selector line + comment)",
+    "docs/DSH-RC2-ADAPTATION.md (R8 cascade-correction note)",
+    "verification-own/s2-mobile-r8-results.json",
+    "lib/ build artifacts"
+  ],
+  "not_run": [
+    "actual computed font in the REAL loaded browser — Codex's final verification; this repo check only confirms the built bundle carries the corrected rule",
+    "native iPhone / iOS Safari acceptance remains NOT PASSED",
+    "public activation of this mobile candidate (prior original public Canary IS approved/active with old installed bytes)",
+    "real provider OAuth / login import NOT RUN; complete actual native iPhone cause of the original clearing not established"
+  ]
+}

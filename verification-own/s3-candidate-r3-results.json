@@ -1,0 +1,59 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "step": "s3-candidate-r3",
+  "date": "2026-10-04",
+  "review": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s3/REVIEW-S3-R13-STREAM-RECOVERY.md (read in full before edits)",
+  "r13CodexObservation": {
+    "source": "Codex real-browser observation on the approved R13 Canary (its own PID 14880 on 3084; protected browser loaded client.js HTTP 200, 44797 bytes, SHA256 816be9be7a49c57970765d051861af246929ebe3bab7039fc481298a6b299700; two original session files byte-identical, zero new model calls, four unauthenticated/malformed route requests rejected 401; formal 3080 untouched).",
+    "finding": "Pages 6/8/9/10 showed the same owned session frame; page 11 as the fifth stream got four 429s with the intended capacity message, no frame, disabled draft. After closing owned page 10 and explicitly switching page 11 Web-preview-to-Agent-browser, a live frame recovered, control stayed idle and input disabled — but the obsolete message 远程画面连接已达上限；请先关闭其他设备的画面。 remained beside the recovered picture. A client recovery-message defect only; authorization and stream-capacity enforcement behaved correctly. Evidence: real-agent-r13-desktop-start.json/jpg, real-agent-r13-stream-capacity.json/jpg, real-agent-r13-phone-ready.json/jpg.",
+    "pendingAtDispatch": "The physical iPhone check on remote.2 was pending at dispatch (desktop takeover was explicitly requested and proved human first). remote.3 public/physical/OAuth/CI are all NOT RUN; this record claims no public activation."
+  },
+  "fix": {
+    "file": "src/client/rc2-client.ts",
+    "change": "A messageRef mirror plus a streamNoticeRef holding the exact capacity/channel-loss notice currently on screen (set only for the capacity and channel kinds — the auth refusal is an authorization fact a recovered picture must not mask). When a VALID frame arrives — after the existing abort/generation guards, session/target/generation match and frameSource parse, at the same point the reconnect budget resets — the obsolete notice is replaced with 画面连接已恢复。, gated on it still being the message on screen.",
+    "guarantees": [
+      "A newer input, composition, submission, lease or other action/success message is never erased (equality gate against the mirrored latest notice).",
+      "Malformed, stale (other session/target/host generation), hidden/unmounted or unrelated frames never trigger the replacement (all existing validation runs first).",
+      "Frames still grant no control authority; requester-bound held receipts, retry bounds, draft/IME/receipt semantics and no-replay behavior are unchanged.",
+      "A stream recovery cannot disguise an independently failed authorization/control channel: the auth-refusal and control-channel notices are not stream notices."
+    ]
+  },
+  "commands": [
+    { "cmd": "NODE_PATH=...sidebar/node_modules npx vitest run tests/rc2-client-lifecycle.test.ts", "result": "pass: 31/31 (28 prior + 3 new focused tests)" },
+    { "cmd": "npm run typecheck", "result": "pass (both tsconfig projects, no errors)" },
+    { "cmd": "npm run build", "result": "pass (host, client, worker)" },
+    { "cmd": "NODE_PATH=... npx vitest run (full plugin suite)", "result": "pass: Test Files 36 passed | 1 skipped (37); Tests 327 passed | 5 skipped (332)" }
+  ],
+  "skipped": "tests/login-import-e2e.test.ts — 5 tests, the pre-existing environment skips (unchanged from remote.1/remote.2 runs).",
+  "newTests": [
+    "replaces an obsolete capacity notice when a valid frame recovers the picture (also asserts the recovered frame grants no input authority before the next requester-bound poll: draft stays disabled)",
+    "keeps the capacity notice through malformed, stale and unrelated frames (bad base64, other target, other session, other host generation; no img rendered)",
+    "keeps a newer action result message through picture recovery frames (an explicit 输入到网页 send result survives later valid frames; the recovery notice never appears)"
+  ],
+  "payloadAudit": {
+    "method": "extracted package payloads from the remote.2 and remote.3 tarballs and compared SHA256 per file",
+    "lib/client.js": "CHANGED — new SHA256 7d77870792e5302a662e4623787303fe13e5916640ead827cc5f47615b84dcc9; the bundle diff is 16 diff lines confined exactly to the notice mechanism (messageRef/streamNoticeRef, the conclude text indirection with the non-auth registration, and the gated replacement in the frame handler)",
+    "lib/index.js": "SAME as remote.2 — SHA256 ce0253676df05699af4078693eda031e590a85c82fd65f99af7a8e86a37cee9d",
+    "bin/ego-cast-worker.mjs": "SAME as remote.2 — SHA256 82e4d4f6e0173bbbb783a681599e717cabe18622720cf17815278d8eb74b1878",
+    "docs + package.json": "CHANGED as intended (version 0.8.6-dsh-remote.3, doc header/follow-up paragraphs); jose 6.2.3 exact and all peers/runtime dependencies unchanged",
+    "verdict": "no unexpected host/worker/control changes"
+  },
+  "tarball": {
+    "location": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/ego/verification-own/dsh-ego-browser-0.8.6-dsh-remote.3.tgz",
+    "bytes": 328428,
+    "sha256": "c374c0eb8695ea1e24ff0ab03349de211fa50ac915fa3f2d649ca1d52b292a54",
+    "npmShasum": "efd898424b011b50172f2e1ea151c6cdaaf234e3",
+    "files": 51,
+    "storedAs": "separately pinned physical artifact (gitignored *.tgz), not a committed archive; remote.1 (b52b91ce...) and remote.2 (7aaefb76...) tarballs untouched"
+  },
+  "preserved": [
+    "commits cc1123435dee829fa934ea66a2f12263a7f3f405 (remote.1) and a342483439c1f7f7a2c4475fe1ff1831be049d2b (remote.2), their tarballs, hashes and all prior verification-own records — unchanged",
+    "historical S2 and R13 review evidence — not rewritten"
+  ],
+  "limitationsAndRollback": [
+    "The notice fix is verified by controlled jsdom/React regressions and a packed-bundle audit; the real-browser recovered-frame behavior on the new package remains Codex's physical re-verification.",
+    "remote.3 public activation, physical device re-test, website OAuth, business-model Ego, joint mirror regression, rollback drill and CI are all NOT RUN; existing independent joint/local business-model checks are cited only as reviewed evidence actually read, and do not prove this package's public activation.",
+    "Rollback compatibility: the change is client-only and additive; rolling back to the remote.2 client bundle restores the previous notice behavior without any host/worker/protocol change (host and worker payloads are byte-identical)."
+  ],
+  "claims": "Bounded local S3 R13 repair handoff. NOT S3 user acceptance, NOT a public activation, NOT a formal release. Stop for independent Codex review."
+}

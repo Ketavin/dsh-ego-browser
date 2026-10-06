@@ -1,0 +1,45 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "round": "S2 extension seam repair (REVIEW-S2-R3)",
+  "date": "2026-10-04",
+  "node_path_workaround_child_only": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules",
+  "typecheck": { "command": "npm run typecheck", "exit": 0, "configs": ["tsconfig.json", "tsconfig.client.json"] },
+  "full_plugin_suite": {
+    "command": "NODE_PATH=<child-only sidebar node_modules> npx vitest run (cwd ego)",
+    "test_files": "36 passed | 1 skipped (37)",
+    "tests": "305 passed | 0 failed | 5 skipped (310)",
+    "skips_are_infra": "tests/login-import-e2e.test.ts (5 tests) skip without a real Chrome/profile environment; unchanged from prior rounds"
+  },
+  "root_suites_read_only_unmodified": {
+    "extension_seams": {
+      "config": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s2/codex-extension-seams.config.ts",
+      "command": "NODE_PATH=<child-only> npx vitest run --config <absolute config> (cwd ego)",
+      "tests": "2 passed | 0 failed (2)"
+    },
+    "all_boundaries": {
+      "config": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s2/codex-all-boundaries.config.ts",
+      "command": "NODE_PATH=<child-only> npx vitest run --config <absolute config> (cwd ego)",
+      "tests": "11 passed | 0 failed (11)",
+      "split": { "s1_codex-boundaries": 4, "s1_codex-hardening": 2, "s1_codex-route-cleanup": 1, "s2_codex-device-cache": 4 }
+    },
+    "device_cache_standalone": { "tests": "4 passed | 0 failed (4)" }
+  },
+  "build": { "command": "npm run build", "exit": 0, "lib_index_js_kB": 229.60, "worker_mjs_kB": 184.91 },
+  "nul_byte_scan": "clean across all changed sources, tests, docs and lib/bin artifacts",
+  "runner_note": "Root suites must run with ego-local vitest 3.2 (npx from ego cwd resolves ego/node_modules/.bin/vitest) plus the child-only NODE_PATH; a bare `npx vitest` from p3-remote resolves a cached Vitest 5 that mishandles the root fixtures' top-level it() (no product change involved).",
+  "changed_this_round": [
+    "src/control-lease.ts",
+    "src/client/rc2-bridge.ts",
+    "src/client/rc2-client.ts",
+    "tests/control-lease.test.ts",
+    "tests/rc2-bridge.test.ts",
+    "tests/rc2-client-lifecycle.test.ts",
+    "docs/DSH-RC2-ADAPTATION.md",
+    "lib/ build artifacts"
+  ],
+  "not_run": [
+    "true Cloudflare Access/WAN/second physical device (joint hard gate, pending protected Canary approval)",
+    "real provider OAuth/login import, actual accounts",
+    "actual compiled CLI/browser lane (Codex-owned)"
+  ]
+}

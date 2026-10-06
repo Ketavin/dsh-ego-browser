@@ -4,12 +4,16 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { homedir, platform } from 'node:os'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import type { AddressInfo } from 'node:net'
 import { WebSocket } from 'ws'
 import { CdpClient } from './cdp-client.ts'
 import { TargetSessions, CdpCaptureBackend } from './capture-cdp.ts'
 import { CaptureManager } from './capture-manager.ts'
 import { FfmpegCaptureBackend } from './capture-ffmpeg.ts'
+import { shouldProbePage, workerRequestRejection } from './request-fence.ts'
+// @ts-expect-error The vendored runtime intentionally has no TypeScript declarations.
+import { scopedBrowserStateOwnership } from '../../runtime/ego-linux/src/process-identity.mjs'
 
 const SENTINEL = '@@DSH_RESULT@@'
 const HOME = homedir() || process.env.HOME || process.env.USERPROFILE || '/root'
@@ -18,6 +22,7 @@ const STATE_HOME = IS_WIN ? process.env.LOCALAPPDATA || join(HOME, 'AppData', 'L
 const STATE_DIR = process.env.EGO_LINUX_STATE_DIR || join(STATE_HOME, 'ego-lite-linux')
 const BROWSER_STATE_FILE = join(STATE_DIR, 'browser.json')
 const CAST_STATE_FILE = join(STATE_DIR, 'ego-cast.json')
+const bootId = randomUUID()
 
 interface CastConfig {
   captureBackend: string
@@ -234,8 +239,8 @@ const manager = new CaptureManager({
   },
 })
 
-async function readBrowserState(): Promise<{ port?: number } | null> {
-  try { return JSON.parse(await import('node:fs/promises').then((fs) => fs.readFile(BROWSER_STATE_FILE, 'utf8'))) as { port?: number } }
+async function readBrowserState(): Promise<{ port?: number; pid?: number; profileDir?: string; binary?: string; wsUrl?: string } | null> {
+  try { return JSON.parse(await import('node:fs/promises').then((fs) => fs.readFile(BROWSER_STATE_FILE, 'utf8'))) }
   catch { return null }
 }
 
@@ -243,9 +248,11 @@ async function resolveBrowser(): Promise<{ wsUrl: string; port: number | null } 
   if (process.env.EGO_LINUX_CDP_URL) return { wsUrl: process.env.EGO_LINUX_CDP_URL, port: null }
   const state = await readBrowserState()
   if (!state?.port) return null
+  if (process.env.DSH_EGO_SCOPED_WORKER === '1' && await scopedBrowserStateOwnership(state, process.env.EGO_LINUX_PROFILE) !== 'owned') return null
   try {
     const response = await fetch(`http://127.0.0.1:${state.port}/json/version`, { signal: AbortSignal.timeout(1500) })
     const wsUrl = response.ok ? (await response.json() as { webSocketDebuggerUrl?: string }).webSocketDebuggerUrl : null
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1' && wsUrl !== state.wsUrl) return null
     return wsUrl ? { port: state.port ?? null, wsUrl } : null
   } catch { return null }
 }
@@ -273,7 +280,7 @@ async function snapshotSpaces(): Promise<Array<Record<string, unknown>>> {
     const frame = frameCache.get(target.targetId)
     const session = active!.sessions.get(target.targetId)
     const cached = probeCache.get(target.targetId)
-    if (!cached || Date.now() - cached.at > 5000) {
+    if (shouldProbePage(process.env.DSH_EGO_SCOPED_WORKER === '1') && (!cached || Date.now() - cached.at > 5000)) {
       active!.sessions.call(target.targetId, 'Runtime.evaluate', { expression: HUMAN_PROBE_JS, returnByValue: true, awaitPromise: false }, 3000)
         .then((result) => { const r = result as { result?: { value?: unknown } }; probeCache.set(target.targetId, { at: Date.now(), human: r.result?.value || null }) }).catch(() => { /* ignore */ })
     }
@@ -360,12 +367,19 @@ function stopSiblingWorkers(): void {
 }
 
 async function main(): Promise<void> {
-  stopSiblingWorkers()
+  // Scoped hosts own a dedicated state directory and must never stop another
+  // profile's worker merely because its executable has the same filename.
+  if (process.env.DSH_EGO_SCOPED_WORKER !== '1') stopSiblingWorkers()
   rmSync(CAST_STATE_FILE, { force: true })
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const rejected = workerRequestRejection(req)
+    if (rejected !== undefined) return sendJson(res, rejected, { ok: false, code: 'worker-request-rejected' })
     const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1' && (url.pathname.startsWith('/api/video/') || url.pathname === '/api/flush')) {
+      return sendJson(res, 409, { ok: false, code: 'unscoped-capability-disabled' })
+    }
     try {
-      if (req.method === 'GET' && url.pathname === '/api/health') return sendJson(res, 200, { workerOk: true, browserConnected: !!active, capture: manager.status() })
+      if (req.method === 'GET' && url.pathname === '/api/health') return sendJson(res, 200, { workerOk: true, pid: process.pid, bootId, profileDir: process.env.EGO_LINUX_PROFILE || '', browserConnected: !!active, capture: manager.status() })
       if (req.method === 'GET' && url.pathname === '/api/spaces') return sendJson(res, 200, { ok: true, spaces: active ? await snapshotSpaces() : [], capture: manager.status() })
       if (req.method === 'GET' && url.pathname === '/api/watch/status') return sendJson(res, 200, { ok: true, ...manager.status() })
       if (req.method === 'GET' && url.pathname === '/api/video/status') return sendJson(res, 200, { ok: true, ...manager.status(), mime: videoInit?.mime || null })
@@ -412,7 +426,7 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   const port = (server.address() as AddressInfo).port
   mkdirSync(STATE_DIR, { recursive: true })
-  writeFileSync(CAST_STATE_FILE, JSON.stringify({ port, pid: process.pid }, null, 2))
+  writeFileSync(CAST_STATE_FILE, JSON.stringify({ port, pid: process.pid, bootId, profileDir: process.env.EGO_LINUX_PROFILE || '' }, null, 2))
   const metadataTimer = setInterval(() => {
     if (!active || sseClients.size === 0) return
     snapshotSpaces().then((spaces) => broadcast('spaces', spaces)).catch(() => { /* ignore */ })

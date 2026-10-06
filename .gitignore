@@ -7,3 +7,4 @@ pnpm-lock.yaml
 PLAN-low-latency-watch-panel.md
 
 .worktrees/
+bin/*.map
