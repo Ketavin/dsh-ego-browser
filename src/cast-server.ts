@@ -3,9 +3,8 @@
  *
  * Bridges the client UI (/api/ego/*) to the ego-cast worker
  * (bin/ego-cast-worker.mjs) that attaches to the agent's live browser and
- * streams screencast JPEGs. Everything the agent's own browser does is pushed;
- * this host route only *reads* the worker's loopback JSON. No navigation, no
- * writes, no host env changes — consistent with the plugin's read-only stance.
+ * streams owned-target screencast JPEGs. Navigation and human input share the
+ * host's scoped control lease; unscoped profile/window capabilities are disabled.
  *
  * Lifecycle: the worker is launched lazily (only once), on the first request,
  * when a live agent browser is expected. If no browser.json exists yet it
@@ -14,10 +13,14 @@
  */
 import { fileURLToPath } from 'node:url'
 import { request, type ClientRequest, type IncomingMessage, type ServerResponse } from 'node:http'
-import type { EgoContext, RegisterRouteOptions, ResolvedConfig, WebServerLike } from './types.ts'
+import { StringDecoder } from 'node:string_decoder'
+import type { EgoContext, RegisterRouteOptions, ResolvedConfig, ScopedBrowserHost, WebServerLike } from './types.ts'
+import { ScopeError } from './session-spaces.ts'
 import type { SettingsBridge } from './settings.ts'
 import type { FfmpegInstallationManager, FfmpegStatus } from './ffmpeg-installation.ts'
 import type { LoginImportOptions, LoginImportReport } from './login-import.ts'
+import { isTrustedDesktopRequest } from './request-trust.ts'
+import type { RemoteAuthorizer, RemoteGrant } from './remote-access.ts'
 
 const WORKER_BIN = fileURLToPath(new URL('../bin/ego-cast-worker.mjs', import.meta.url))
 
@@ -35,6 +38,16 @@ export const EGO_WATCH_STOP_ROUTE = '/api/ego/watch/stop'
 export const EGO_WATCH_STATUS_ROUTE = '/api/ego/watch/status'
 export const EGO_VIDEO_ROUTE = '/api/ego/video'
 export const EGO_VIDEO_STATUS_ROUTE = '/api/ego/video/status'
+export const EGO_NAVIGATE_ROUTE = '/api/ego/navigate'
+export const EGO_CONTEXT_ROUTE = '/api/ego/context'
+export const EGO_CONTROL_STATUS_ROUTE = '/api/ego/control/status'
+export const EGO_CONTROL_TAKEOVER_ROUTE = '/api/ego/control/takeover'
+export const EGO_CONTROL_RELEASE_ROUTE = '/api/ego/control/release'
+export const EGO_CONTROL_ARM_ROUTE = '/api/ego/control/arm'
+export const EGO_CONTROL_PREPARE_ROUTE = '/api/ego/control/prepare-continue'
+export const EGO_CONTROL_COMMIT_ROUTE = '/api/ego/control/commit-continue'
+export const EGO_CONTROL_ABORT_ROUTE = '/api/ego/control/abort-continue'
+export const EGO_TOOL_EVENTS_ROUTE = '/api/ego/tool-events'
 
 // ── tool-call signal (auto-open sidebar Tab) ─────────────────────────────
 // Module-level counter bumped by markEgoToolCall() from the tool execute
@@ -45,7 +58,119 @@ export const EGO_VIDEO_STATUS_ROUTE = '/api/ego/video/status'
 //  that loop is now gone.) Process-local; resets to 0 on host restart,
 // which is fine — the auto-open is a one-shot per session anyway.
 let toolCallCount = 0
-const sseClients = new Set<ServerResponse>()
+const sseClients = new Map<ServerResponse, { sessionIds: Set<string>; host: ScopedBrowserHost } | undefined>()
+const sessionToolCounts = new Map<string, number>()
+const requestBodies = new WeakMap<IncomingMessage, Record<string, unknown>>()
+const requestSessions = new WeakMap<IncomingMessage, string[]>()
+/** Per-request remote authorization grant (present only for remote callers). */
+const requestRemote = new WeakMap<IncomingMessage, RemoteGrant>()
+
+/**
+ * True once a request's remote grant has expired. The grant does not outlive
+ * its JWT expiry across asynchronous gaps (a trickling request body, worker
+ * health discovery): before entering a NEW control/worker operation the grant
+ * is re-checked, and an expired request is refused with a safe auth code
+ * before any side effect. Already-started operations are never cancelled, and
+ * this is the JWT's own lifetime — it is independent of the control lease TTL.
+ */
+function remoteGrantExpired(req: IncomingMessage): boolean {
+  const grant = requestRemote.get(req)
+  return grant !== undefined && grant.expiresAtMs <= Date.now()
+}
+
+const refuseExpiredRemote = (res: ServerResponse): void => {
+  sendJson(res, 401, { ok: false, code: 'remote-authorization-expired', error: 'forbidden' })
+}
+
+// ── remote stream bounds ─────────────────────────────────────────────────────
+// Explicit limits for remote (plugin-authorized) streams only. Local desktop
+// streams keep their exact previous behavior; these bounds never apply to
+// them. Values are host constants, not settings — remote access limits are
+// part of the reviewed authorization contract, not a user preference.
+/** Hard ceiling on one remote SSE connection, independent of JWT expiry. */
+export const REMOTE_MAX_STREAM_MS = 10 * 60_000
+/** Upper bound on concurrent remote SSE connections (owner + a few devices). */
+export const REMOTE_MAX_STREAMS = 4
+/** Largest single forwarded frame block (base64 JPEG headroom at 1920px). */
+export const REMOTE_MAX_FRAME_BYTES = 4 * 1024 * 1024
+/** Sliding window for remote frame frequency (sustained 30fps + headroom). */
+export const REMOTE_FRAME_WINDOW_MS = 10_000
+export const REMOTE_MAX_FRAMES_PER_WINDOW = 360
+/** Dropped/violating frames tolerated before the remote stream terminates. */
+export const REMOTE_MAX_FRAME_VIOLATIONS = 32
+
+let remoteStreamCount = 0
+/** For tests/diagnostics: how many remote streams are open right now. */
+export function activeRemoteStreams(): number {
+  return remoteStreamCount
+}
+
+/**
+ * A bounded lease on one remote stream slot. Lifetime is capped by BOTH the
+ * verified JWT expiry and REMOTE_MAX_STREAM_MS, whichever comes first, so a
+ * reconnect always re-presents a fresh assertion to the full authorization
+ * chain (never an implicitly extended session).
+ */
+export interface RemoteStreamTicket {
+  readonly deadlineAtMs: number
+}
+
+export function acquireRemoteStreamTicket(expiresAtMs: number, now: number = Date.now()): RemoteStreamTicket | null {
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) return null
+  if (remoteStreamCount >= REMOTE_MAX_STREAMS) return null
+  remoteStreamCount += 1
+  return { deadlineAtMs: Math.min(expiresAtMs, now + REMOTE_MAX_STREAM_MS) }
+}
+
+function releaseRemoteStream(): void {
+  remoteStreamCount = Math.max(0, remoteStreamCount - 1)
+}
+
+/** Per-stream remote frame accounting (forwarded frames + violations). */
+export interface RemoteFrameLimiter {
+  /** Decide whether one frame block may be forwarded; record the decision. */
+  allow(block: string): boolean
+  /** True once the violation budget is exhausted and the stream must end. */
+  exhausted(): boolean
+}
+
+/**
+ * Bound per-frame bytes and frame frequency for one remote stream. Dropping a
+ * violating frame keeps the panel alive (it just skips a beat); exhausting the
+ * violation budget terminates the stream so a hostile or runaway upstream
+ * cannot stream unbounded bytes through a remote connection.
+ */
+export function createRemoteFrameLimiter(
+  limits: { maxFrameBytes: number; windowMs: number; maxFramesPerWindow: number; maxViolations: number } = {
+    maxFrameBytes: REMOTE_MAX_FRAME_BYTES,
+    windowMs: REMOTE_FRAME_WINDOW_MS,
+    maxFramesPerWindow: REMOTE_MAX_FRAMES_PER_WINDOW,
+    maxViolations: REMOTE_MAX_FRAME_VIOLATIONS,
+  },
+  now: () => number = Date.now,
+): RemoteFrameLimiter {
+  let violations = 0
+  let frameTimes: number[] = []
+  return {
+    allow(block: string): boolean {
+      if (Buffer.byteLength(block) > limits.maxFrameBytes) {
+        violations += 1
+        return false
+      }
+      const at = now()
+      frameTimes = frameTimes.filter(time => at - time < limits.windowMs)
+      if (frameTimes.length >= limits.maxFramesPerWindow) {
+        violations += 1
+        return false
+      }
+      frameTimes.push(at)
+      return true
+    },
+    exhausted(): boolean {
+      return violations > limits.maxViolations
+    },
+  }
+}
 
 /** Timestamp of the last ego_* tool call — the idle reaper's activity signal. */
 let lastEgoActivity = 0
@@ -53,8 +178,11 @@ export function getLastEgoActivity(): number {
   return lastEgoActivity
 }
 
-export function markEgoToolCall(sessionId?: string): void {
+export function markEgoToolCall(sessionId?: string, hostGeneration?: string): void {
+  if (!sessionId) return
   toolCallCount += 1
+  const key = JSON.stringify([hostGeneration, sessionId])
+  sessionToolCounts.set(key, (sessionToolCounts.get(key) ?? 0) + 1)
   lastEgoActivity = Date.now()
   // Push the new count to every connected SSE client immediately. The event
   // payload carries the counter AND the calling session id (when the caller
@@ -63,23 +191,37 @@ export function markEgoToolCall(sessionId?: string): void {
   // the one the user happens to be reading.
   const payload = sessionId === undefined || sessionId === ''
     ? { count: toolCallCount }
-    : { count: toolCallCount, sessionId }
+    : { count: sessionToolCounts.get(key), sessionId, hostGeneration }
   const frame = `event: tool-call\ndata: ${JSON.stringify(payload)}\n\n`
-  for (const res of sseClients) {
+  for (const [res, scope] of sseClients) {
+    if (!scope?.sessionIds.has(sessionId) || scope.host.scopes.generation !== hostGeneration) continue
     try {
+      scope.host.validateSession(sessionId)
       res.write(frame)
     } catch {
       sseClients.delete(res)
     }
   }
 }
+export function revokeEgoSignals(sessionId: string, hostGeneration: string): void {
+  sessionToolCounts.delete(JSON.stringify([hostGeneration, sessionId]))
+  for (const [res, scope] of sseClients) {
+    if (scope?.host.scopes.generation !== hostGeneration) continue
+    scope.sessionIds.delete(sessionId)
+    if (!scope.sessionIds.size) { sseClients.delete(res); try { res.end() } catch { /* closed */ } }
+  }
+}
+/** Public Agent activity boundaries reset metadata; this is not a call trace. */
+export function resetEgoToolCounts(sessionId: string, hostGeneration: string): void {
+  sessionToolCounts.delete(JSON.stringify([hostGeneration, sessionId]))
+}
 
-function castStatePath(): string {
+function castStatePath(env: NodeJS.ProcessEnv = process.env): string {
   // Mirror the ego-lite runtime state dir across platforms so we find the
   // worker's ego-cast.json wherever it ran: Windows uses
   // %LOCALAPPDATA%\ego-lite-linux; POSIX uses $XDG_STATE_HOME (default
   // ~/.local/state)/ego-lite-linux. Honors EGO_LINUX_STATE_DIR overrides.
-  const e = process.env
+  const e = env
   const isWin = process.platform === 'win32'
   const home = e.HOME || e.USERPROFILE || (isWin ? e.LOCALAPPDATA || '' : '/root')
   const stateHome = e.EGO_LINUX_STATE_DIR || (isWin
@@ -145,13 +287,64 @@ export async function proxyPost(port: number, path: string, body: unknown, timeo
  * markEgoToolCall() can inject `tool-call` events directly into the live
  * stream (the sidebar auto-open signal), without the client polling.
  */
-export function proxyWorkerStream(port: number, res: ServerResponse, path: string): () => void {
+export function filterScopedSse(block: string, host: ScopedBrowserHost, sessionId: string, targetId: string): string {
+  const event = block.split('\n').find(line => line.startsWith('event:'))?.slice(6).trim()
+  const raw = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n')
+  try {
+    host.validateSession(sessionId)
+    const value = JSON.parse(raw) as Record<string, unknown>
+    const owned = (id: unknown) => { try { host.scopes.assertTarget(sessionId, id); return true } catch { return false } }
+    if (event === 'spaces' && Array.isArray(value)) return `event: spaces\ndata: ${JSON.stringify(value.filter(tab => owned(tab.targetId)))}\n\n`
+    if ((event === 'frame' || event === 'capture-status') && value.targetId === targetId && owned(value.targetId)) {
+      return `event: ${event}\ndata: ${JSON.stringify({ ...value, sessionId, hostGeneration: host.scopes.generation })}\n\n`
+    }
+  } catch { /* malformed or unknown events fail closed */ }
+  return ''
+}
+
+export function proxyWorkerStream(port: number, res: ServerResponse, path: string, scope?: { host: ScopedBrowserHost; sessionId: string; targetId?: string; remote?: RemoteStreamTicket; onEnded?: () => void }): () => void {
   let cancelled = false
   let ended = false
+  let deadlineTimer: NodeJS.Timeout | undefined
+  let up: ClientRequest | undefined
+  // OUR named subscriptions on the downstream response. Teardown must detach
+  // exactly these — never removeAllListeners, which would drop other
+  // components' listeners on the same response.
+  let drainResume: (() => void) | undefined
+  let closeListener: (() => void) | undefined
   const endOnce = (): void => {
     if (ended) return
     ended = true
+    cancelled = true
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+    if (scope?.remote) releaseRemoteStream()
     sseClients.delete(res)
+    // Detach our own subscriptions: a backpressure drain callback must not
+    // outlive the stream (holding the upstream) and the close listener must
+    // not linger once the stream has ended. This runs on every termination
+    // path — deadline, limits, upstream error/end, downstream disconnect,
+    // explicit stop — independent of the downstream ever flushing or closing.
+    if (drainResume !== undefined) {
+      res.removeListener('drain', drainResume)
+      drainResume = undefined
+    }
+    if (closeListener !== undefined) {
+      res.removeListener('close', closeListener)
+      closeListener = undefined
+    }
+    scope?.onEnded?.()
+    // Actively destroy the worker request/response — every teardown path
+    // (deadline, limits, upstream error, downstream close, stop, unload) must
+    // close the upstream itself. A blocked downstream that cannot flush (and
+    // so never emits close) must not leave the worker connection open; a
+    // res.end() call alone proves nothing about the upstream.
+    if (up !== undefined) {
+      try {
+        up.destroy()
+      } catch {
+        /* ignore */
+      }
+    }
     try {
       res.end()
     } catch {
@@ -165,7 +358,17 @@ export function proxyWorkerStream(port: number, res: ServerResponse, path: strin
     'x-accel-buffering': 'no',
   })
   res.write(':ok\n\n')
-  sseClients.add(res)
+  sseClients.set(res, scope ? { sessionIds: new Set([scope.sessionId]), host: scope.host } : undefined)
+  // Remote streams carry a ticket whose deadline (JWT expiry capped by the
+  // maximum connection window) ends the connection — reconnect must
+  // re-authorize. Expiry only closes the picture; it never arms or resumes
+  // the Agent (control paths are untouched here). unref keeps a parked timer
+  // from holding the host's event loop; every close path clears it.
+  const limiter = scope?.remote ? createRemoteFrameLimiter() : undefined
+  if (scope?.remote) {
+    deadlineTimer = setTimeout(endOnce, Math.max(0, scope.remote.deadlineAtMs - Date.now()))
+    deadlineTimer.unref?.()
+  }
   // No worker to bridge (ensureWorker() returned null and the handler passed
   // the -1 sentinel): keep the SSE connection open and quiet so
   // markEgoToolCall() can still push `tool-call` events and EventSource does
@@ -174,28 +377,56 @@ export function proxyWorkerStream(port: number, res: ServerResponse, path: strin
   // webserver's last-resort guard turns into a bare connection destroy —
   // the browser then reports net::ERR_EMPTY_RESPONSE.
   if (!Number.isInteger(port) || port <= 0) {
-    res.on('close', () => {
+    closeListener = () => {
       sseClients.delete(res)
-    })
+      // A remote ticket must be returned even on the quiet stream; endOnce is
+      // idempotent and res.end() on a closed socket is a swallowed no-op.
+      if (scope?.remote) endOnce()
+    }
+    res.on('close', closeListener)
     return () => {
       sseClients.delete(res)
+      endOnce()
     }
   }
   // Use node:http (not fetch) to consume the worker's SSE stream. fetch buffers
   // chunked responses in a way that delays/interleaves the first data chunks
   // under Node's undici, which the real-time frame pipeline cannot tolerate —
   // http.request streams them as they arrive and frames forward immediately.
-  const up: ClientRequest = request(
+  up = request(
     { host: '127.0.0.1', port, path, method: 'GET', headers: { accept: 'text/event-stream' } },
     (upRes: IncomingMessage) => {
+      let pending = ''
+      const decoder = new StringDecoder('utf8')
       upRes.on('data', (chunk: Buffer) => {
         if (cancelled || ended) return
         try {
-          if (!res.write(chunk)) {
+          let output: string | Buffer = chunk
+          if (scope) {
+            pending = (pending + decoder.write(chunk)).replace(/\r\n/g, '\n')
+            if (pending.length > 8 * 1024 * 1024) { up?.destroy(); endOnce(); return }
+            const blocks = pending.split('\n\n')
+            pending = blocks.pop() ?? ''
+            output = blocks.map(block => {
+              const scoped = filterScopedSse(block, scope.host, scope.sessionId, scope.targetId ?? '')
+              // Remote frames additionally pass the byte/frequency bounds;
+              // non-frame events (spaces/tool-call) stay as-is and the
+              // unfiltered-pending cap above still bounds total memory.
+              if (scoped === '' || limiter === undefined || !scoped.startsWith('event: frame\n')) return scoped
+              return limiter.allow(scoped) ? scoped : ''
+            }).join('')
+            if (limiter?.exhausted()) { up?.destroy(); endOnce(); return }
+          }
+          if (output.length > 0 && !res.write(output)) {
             upRes.pause()
-            res.once('drain', () => {
+            // Named so teardown can detach it; `once` self-removes on fire,
+            // but a stream ended while blocked must not leave it installed
+            // holding the upstream.
+            drainResume = () => {
+              drainResume = undefined
               if (!cancelled && !ended) upRes.resume()
-            })
+            }
+            res.once('drain', drainResume)
           }
         } catch {
           cancelled = true
@@ -206,34 +437,36 @@ export function proxyWorkerStream(port: number, res: ServerResponse, path: strin
       upRes.on('error', endOnce)
     },
   )
-  up.on('error', endOnce)
-  up.setTimeout(5000, () => {
+  up!.on('error', endOnce)
+  up!.setTimeout(5000, () => {
     try {
-      up.destroy()
+      up?.destroy()
     } catch {
       /* ignore */
     }
     endOnce()
   })
-  up.end()
+  up!.end()
   const onClose = (): void => {
     cancelled = true
     sseClients.delete(res)
     try {
-      up.destroy()
+      up?.destroy()
     } catch {
       /* ignore */
     }
   } // don't end res here; let worker stream close it
+  closeListener = onClose
   res.on('close', onClose)
   return () => {
     cancelled = true
     sseClients.delete(res)
     try {
-      up.destroy()
+      up?.destroy()
     } catch {
       /* ignore */
     }
+    endOnce()
   }
 }
 
@@ -301,6 +534,8 @@ function proxyWorkerVideo(port: number, req: IncomingMessage, res: ServerRespons
 }
 
 async function readJsonBody(req: IncomingMessage, maxBytes = 8192): Promise<Record<string, unknown>> {
+  const cached = requestBodies.get(req)
+  if (cached) return cached
   const chunks: Buffer[] = []
   let bytes = 0
   for await (const chunk of req) {
@@ -314,16 +549,20 @@ async function readJsonBody(req: IncomingMessage, maxBytes = 8192): Promise<Reco
 interface WorkerState {
   port: number | null
   pid: number | null
+  bootId?: string
+  profileDir?: string
 }
 
 /** Read the worker's { port, pid } from ego-cast.json, if any. */
-async function knownWorkerState(): Promise<WorkerState> {
+async function knownWorkerState(env?: NodeJS.ProcessEnv): Promise<WorkerState> {
   try {
     const { readFile } = await import('node:fs/promises')
-    const state = JSON.parse(await readFile(castStatePath(), 'utf8')) as { port?: unknown; pid?: unknown }
+    const state = JSON.parse(await readFile(castStatePath(env), 'utf8')) as { port?: unknown; pid?: unknown; bootId?: unknown; profileDir?: unknown }
     return {
       port: typeof state.port === 'number' ? state.port : null,
       pid: typeof state.pid === 'number' ? state.pid : null,
+      bootId: typeof state.bootId === 'string' ? state.bootId : undefined,
+      profileDir: typeof state.profileDir === 'string' ? state.profileDir : undefined,
     }
   } catch {
     return { port: null, pid: null }
@@ -350,18 +589,27 @@ export const FRAME_RELAY_DISABLED = 'frame relay disabled'
  * screencast / WGC capture and the ffmpeg pull, so killing it is what actually
  * turns the frame relay off when the setting is flipped while it is running —
  * no HTTP shutdown route exists in bin/ego-cast-worker.mjs (it exits on
- * SIGTERM/SIGINT). A stale ego-cast.json is harmless: ensureWorker() proves the
- * pid is alive before trusting the recorded port.
+ * SIGTERM/SIGINT). A recorded PID is insufficient: the private worker must
+ * answer with the exact stored boot ID/PID/profile before it can be stopped.
  */
-export async function stopCastWorker(): Promise<boolean> {
-  const state = await knownWorkerState()
-  if (state.pid === null || !isProcessAlive(state.pid)) return false
+export async function stopCastWorker(env?: NodeJS.ProcessEnv): Promise<boolean> {
+  const state = await knownWorkerState(env)
+  if (state.pid === null || state.pid === process.pid || !isProcessAlive(state.pid)) return false
+  if (!await workerIdentity(state, env)) return false
   try {
     process.kill(state.pid, 'SIGTERM')
     return true
   } catch {
     return false
   }
+}
+
+/** Bind the recorded PID/port to this exact worker boot and runtime profile. */
+async function workerIdentity(state: WorkerState, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  if (!state.port || !state.bootId || state.bootId.length < 16 || state.profileDir === undefined) return false
+  if (env?.DSH_EGO_SCOPED_WORKER === '1' && state.profileDir !== env.EGO_LINUX_PROFILE) return false
+  const health = await proxyFrom(state.port, '/api/health') as Record<string, unknown> | null
+  return health?.workerOk === true && health.pid === state.pid && health.bootId === state.bootId && health.profileDir === state.profileDir
 }
 
 interface CaptureConfigPayload {
@@ -410,15 +658,15 @@ type PushConfig = (cfg: ResolvedConfig) => Promise<void>
  * worker is brought back without a host restart. Spawn is rate-limited to
  * avoid hot-looping while a headless container has no browser yet.
  */
-function makeEnsureWorker(ctx: EgoContext, cfg: ResolvedConfig, ffmpegManager: FfmpegInstallationManager | null): EnsureWorker {
+function makeEnsureWorker(ctx: EgoContext, cfg: ResolvedConfig, ffmpegManager: FfmpegInstallationManager | null, env?: NodeJS.ProcessEnv): EnsureWorker {
   let lastAttempt = 0
   async function launchedWorkerPort(): Promise<number | null> {
-    const state = await knownWorkerState()
+    const state = await knownWorkerState(env)
     if (state.pid === null || !isProcessAlive(state.pid)) return null
-    const alive = await proxyFrom(state.port!, '/api/health')
-    return alive ? state.port : null
+    return await workerIdentity(state, env) ? state.port : null
   }
   return async function ensureWorker(): Promise<number | null> {
+    if (!env) return null
     const running = await launchedWorkerPort()
     if (running !== null) return running
     // Worker is dead or not yet up; spawn one, rate-limited.
@@ -429,7 +677,7 @@ function makeEnsureWorker(ctx: EgoContext, cfg: ResolvedConfig, ffmpegManager: F
         // Pass the current cast config to the worker as a JSON argv arg so it
         // starts with the right screencast parameters without needing an
         // extra round-trip POST. The worker reads process.argv[2].
-        await ffmpegManager?.check({ configuredPath: cfg.ffmpegPath, requestedEncoder: cfg.ffmpegEncoder }).catch(() => null)
+        if (!env) await ffmpegManager?.check({ configuredPath: cfg.ffmpegPath, requestedEncoder: cfg.ffmpegEncoder }).catch(() => null)
         const initCfg = JSON.stringify(captureConfig(cfg, ffmpegManager))
         const handle = ctx.subprocess.spawn({
           argv: [process.execPath, WORKER_BIN, initCfg],
@@ -442,9 +690,7 @@ function makeEnsureWorker(ctx: EgoContext, cfg: ResolvedConfig, ffmpegManager: F
           // second Electron app (issue #42). Mirror of resolveEgoEnv's guard —
           // inlined here because cast-server cannot import from index.ts
           // (circular import).
-          env: (process.versions as { electron?: string }).electron
-            ? { ...process.env, ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE ?? '1' }
-            : undefined,
+          env: { ...env, ...(process.versions as { electron?: string }).electron ? { ELECTRON_RUN_AS_NODE: env.ELECTRON_RUN_AS_NODE ?? '1' } : {} },
           stdio: {
             stdin: { data: '' },
             stdout: { maxBytes: 8192 },
@@ -508,8 +754,11 @@ export function initCastServer(
   ffmpegManager: FfmpegInstallationManager | null,
   openAgentWindow: () => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: false, error: 'raise not supported by this host build' }),
   loginImport: (opts: LoginImportOptions) => Promise<LoginImportReport> = async () => ({ ok: false, error: 'login import not supported by this host build' }),
+  host?: ScopedBrowserHost,
+  /** Plugin-owned remote authorization (null/omitted = remote access off). */
+  remoteAuth?: RemoteAuthorizer | null,
 ): void {
-  const ensureWorker = makeEnsureWorker(ctx, cfg, ffmpegManager)
+  const ensureWorker = makeEnsureWorker(ctx, cfg, ffmpegManager, host?.runtimeEnv)
   const pushConfig = makePushConfig(ensureWorker, ffmpegManager)
   // The web shell exposes `webServer` — the only HTTP host surface the plugin
   // uses. It is NOT a required inject (TUI / headless hosts have none), so we
@@ -523,23 +772,95 @@ export function initCastServer(
   // ── trust fence for /api/ego/* ────────────────────────────────────────────
   // Exact-path routes match BEFORE the host's `/api` prefix trust-fence route,
   // so every handler below would otherwise answer unauthenticated requests.
-  // The host issues a `dsh-auth-<processKey>` cookie that is HttpOnly AND
-  // SameSite=Strict: a cross-site page (CSRF driver-by) never carries it, so
-  // requiring its mere presence closes the remote surface. A local process can
-  // still forge the header, but that is the same threat tier as the host's own
-  // token fence (a local process can read the process token too).
-  const isTrustedRequest = (req: IncomingMessage): boolean =>
-    /(?:^|;\s*)dsh-auth-[^=]+=/.test(String(req.headers.cookie ?? ''))
-  const guardHandler = (handler: NonNullable<RegisterRouteOptions['handler']>) =>
+  // Delegate to the same public Host fence as open-in-app. The deployed rc.2
+  // fence is loopback + browser trust, not a login/identity layer. Remote
+  // callers are refused; inventing a dsh-auth cookie cannot bypass the fence.
+  // The ONLY additional path is the plugin-owned remote authorization below:
+  // it runs strictly AFTER the Host fence refused the request, never patches
+  // or re-runs it, and a verified grant changes nothing about the guard chain
+  // that follows (method/body, session, target, generation, lease checks all
+  // still apply to remote callers).
+  const readRoutes = new Set([
+    EGO_SPACES_ROUTE, EGO_STREAM_ROUTE, EGO_HEALTH_ROUTE, EGO_WATCH_STATUS_ROUTE,
+    EGO_VIDEO_ROUTE, EGO_VIDEO_STATUS_ROUTE,
+    EGO_CONTROL_STATUS_ROUTE,
+    EGO_TOOL_EVENTS_ROUTE,
+  ])
+  // Control-affecting operations must name the requesting client device: the
+  // human lease is bound to exactly ONE device of the session, so two devices
+  // sharing the same person/chat cannot both act on the same lease. Passive
+  // same-session reads (spaces/SSE/watch status) stay open to every device.
+  const clientIdentityRoutes = new Set([
+    EGO_INPUT_ROUTE, EGO_CLOSE_ROUTE, EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE,
+    EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE,
+    EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE,
+  ])
+  const guardHandler = (path: string, handler: NonNullable<RegisterRouteOptions['handler']>) =>
     async (req: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
-      if (!isTrustedRequest(req as IncomingMessage)) {
-        res.statusCode = 401
-        res.setHeader('Content-Type', 'application/json; charset=utf-8')
-        res.end('{"ok":false,"error":"unauthorized"}')
-        return
+      const request = req as IncomingMessage
+      if (!isTrustedDesktopRequest(ctx, request)) {
+        if (!remoteAuth) return sendJson(res, 403, { ok: false, error: 'forbidden' })
+        const grant = await remoteAuth.authorize(request)
+        if (!('expiresAtMs' in grant)) {
+          // Codes only — never the assertion, header values or config fields.
+          return sendJson(res, grant.status, { ok: false, code: grant.code, error: 'forbidden' })
+        }
+        requestRemote.set(request, { expiresAtMs: grant.expiresAtMs })
       }
-      return handler(req, res)
+      const method = readRoutes.has(path) ? 'GET' : 'POST'
+      if ((req as IncomingMessage).method !== method) {
+        res.setHeader('Allow', method)
+        return sendJson(res, 405, { ok: false, error: `${method} required` })
+      }
+      if (method === 'POST' && (req as IncomingMessage).headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json')
+        return sendJson(res, 415, { ok: false, error: 'application/json required' })
+      try {
+        if (path === EGO_CONTROL_ARM_ROUTE) throw new ScopeError('continuation-gate-required')
+        if ([EGO_RAISE_ROUTE, EGO_LOGIN_IMPORT_ROUTE, EGO_FLUSH_ROUTE, EGO_VIDEO_ROUTE, EGO_VIDEO_STATUS_ROUTE].includes(path)) throw new ScopeError('unscoped-capability-disabled')
+        if (!host) throw new ScopeError('scope-service-unavailable')
+        const url = new URL(request.url ?? path, 'http://dsh.internal')
+        if (path === EGO_TOOL_EVENTS_ROUTE) {
+          const ids: unknown = JSON.parse(url.searchParams.get('sessionIds') ?? 'null')
+          if (!Array.isArray(ids) || !ids.length || ids.length > 256 || new Set(ids).size !== ids.length) throw new ScopeError('session-set-invalid')
+          for (const id of ids) host.validateSession(id)
+          const generation = url.searchParams.get('hostGeneration')
+          if (generation !== null && generation !== host.scopes.generation) throw new ScopeError('host-generation-stale')
+          requestSessions.set(request, ids as string[])
+          return await handler(req, res)
+        }
+        const body = method === 'POST' ? await readJsonBody(request) : undefined
+        // The body read can pause arbitrarily long (a trickling client). The
+        // remote grant is re-checked after that asynchronous wait, before any
+        // guard work, worker call or control operation — an expired
+        // authorization must not start a NEW action. Local requests skip this.
+        if (remoteGrantExpired(request)) return refuseExpiredRemote(res)
+        if (method === 'POST' && (!body || typeof body !== 'object' || Array.isArray(body))) throw new ScopeError('json-object-required')
+        if (body) {
+          if (typeof body.requestId !== 'string' || !body.requestId || body.requestId.length > 128) throw new ScopeError('request-id-required')
+          requestBodies.set(request, body)
+        }
+        if (clientIdentityRoutes.has(path) && (typeof body?.clientId !== 'string' || !body.clientId || body.clientId.length > 128)) {
+          throw new ScopeError('client-id-required')
+        }
+        const sessionId = host.validateSession(body?.sessionId ?? url.searchParams.get('sessionId'))
+        const generation = body?.hostGeneration ?? url.searchParams.get('hostGeneration')
+        if (generation !== undefined && generation !== null && generation !== host.scopes.generation) throw new ScopeError('host-generation-stale')
+        if (method === 'POST' && !host.runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+        const binding = host.scopes.require(sessionId)
+        if ([EGO_INPUT_ROUTE, EGO_CLOSE_ROUTE, EGO_WATCH_START_ROUTE, EGO_WATCH_SWITCH_ROUTE].includes(path)) host.scopes.assertTarget(sessionId, body?.targetId)
+        if ([EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE].includes(path) && body?.targetId !== undefined) host.scopes.assertTarget(sessionId, body.targetId)
+        if ([EGO_INPUT_ROUTE, EGO_CLOSE_ROUTE].includes(path)) host.control.assertHuman(sessionId, body?.leaseEpoch, typeof body?.clientId === 'string' ? body.clientId : undefined)
+        if (path === EGO_CONTROL_TAKEOVER_ROUTE && body?.leaseEpoch !== undefined && body.leaseEpoch !== host.control.status(sessionId).leaseEpoch) throw new ScopeError('lease-epoch-stale')
+        if (path === EGO_STREAM_ROUTE && url.searchParams.get('eventsOnly') !== '1') host.scopes.assertTarget(sessionId, url.searchParams.get('targetId'))
+        if ([EGO_WATCH_START_ROUTE, EGO_WATCH_SWITCH_ROUTE, EGO_WATCH_STOP_ROUTE].includes(path)) {
+          if (typeof body?.clientId !== 'string' || !body.clientId || body.clientId.length > 128) throw new ScopeError('client-id-required')
+          body.clientId = JSON.stringify([binding.generation, sessionId, body.clientId])
+        }
+        return await handler(req, res)
+      } catch (error) {
+        return sendJson(res, error instanceof ScopeError ? 409 : 400, { ok: false, code: error instanceof ScopeError ? error.code : 'request-failed', error: error instanceof ScopeError ? error.message : 'request failed' })
+      }
     }
   // Scope the guard to THIS plugin's registrations only: never patch the host
   // webServer singleton in place — other plugins' routes registered through the
@@ -548,7 +869,7 @@ export function initCastServer(
   const server = Object.assign(Object.create(Object.getPrototypeOf(rawServer)), rawServer, {
     register: (opts: RegisterRouteOptions) => rawRegister({
       ...opts,
-      handler: opts.handler ? guardHandler(opts.handler) : opts.handler,
+      handler: guardHandler(opts.path, opts.handler),
     }),
   })
 
@@ -581,7 +902,7 @@ export function initCastServer(
       // instead (idempotent — a dead/absent worker is a no-op). Relay back on:
       // the next request lazily restarts the worker with the current config.
       if (relayDisabled()) {
-        void stopCastWorker()
+        if (host?.runtimeEnv) void stopCastWorker(host.runtimeEnv)
         return
       }
       pushConfig(cfg)
@@ -597,23 +918,133 @@ export function initCastServer(
     }
   }
 
+  const sessionFor = (reqRaw: unknown): string => {
+    const req = reqRaw as IncomingMessage
+    return host!.validateSession(requestBodies.get(req)?.sessionId ?? new URL(req.url ?? '', 'http://dsh.internal').searchParams.get('sessionId'))
+  }
+  const streams = new Set<() => void>()
+  const keepStream = (stop: () => void, res: ServerResponse): { wrapped: () => void; unregister: () => void } => {
+    // One idempotent unregister removes BOTH the per-plugin Set entry AND
+    // this registration's own named close listener, so every termination path
+    // (deadline, explicit stop, upstream end/error, quiet stream, unload)
+    // fully detaches the route-layer registration without depending on the
+    // downstream ever flushing or closing. Only our own listener is removed —
+    // other components' close subscriptions on the same response are theirs.
+    const wrapped = (): void => {
+      unregister()
+      stop()
+    }
+    const onStreamClose = (): void => { unregister() }
+    let done = false
+    const unregister = (): void => {
+      if (done) return
+      done = true
+      streams.delete(wrapped)
+      res.removeListener('close', onStreamClose)
+    }
+    streams.add(wrapped)
+    res.on('close', onStreamClose)
+    return { wrapped, unregister }
+  }
+  const disposeToolEvents = server.register({ kind: 'exact', path: EGO_TOOL_EVENTS_ROUTE, handler: (reqRaw: unknown, resRaw: unknown) => {
+    const res = resRaw as ServerResponse
+    const req = reqRaw as IncomingMessage
+    const ids = requestSessions.get(req)!
+    // Remote SSE gets the same bounded lifetime/concurrency treatment as the
+    // frame stream: a ticket caps the connection by JWT expiry + max window,
+    // and capacity is refused as JSON before any SSE headers are written.
+    const remoteTicket = (requestRemote.has(req) ? acquireRemoteStreamTicket(requestRemote.get(req)!.expiresAtMs) : undefined) ?? undefined
+    if (requestRemote.has(req) && remoteTicket === undefined) {
+      return sendJson(res, 429, { ok: false, code: 'remote-stream-capacity', error: 'too many remote streams' })
+    }
+    let deadlineTimer: NodeJS.Timeout | undefined
+    let stopped = false
+    let toolClose: () => void = () => {}
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+      if (remoteTicket !== undefined) releaseRemoteStream()
+      // Detach our own close subscription — not other components' listeners.
+      res.removeListener('close', toolClose)
+      sseClients.delete(res); streams.delete(stop); try { res.end() } catch { /* disconnected */ } }
+    if (remoteTicket !== undefined) {
+      deadlineTimer = setTimeout(stop, Math.max(0, remoteTicket.deadlineAtMs - Date.now()))
+      deadlineTimer.unref?.()
+    }
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+    res.write(':ok\n\n')
+    sseClients.set(res, { sessionIds: new Set(ids), host: host! })
+    for (const sessionId of ids) {
+      const count = sessionToolCounts.get(JSON.stringify([host!.scopes.generation, sessionId])) ?? 0
+      if (count > 0) res.write(`event: tool-call\ndata: ${JSON.stringify({ sessionId, hostGeneration: host!.scopes.generation, count })}\n\n`)
+    }
+    toolClose = () => { sseClients.delete(res); streams.delete(stop); if (remoteTicket !== undefined) stop() }
+    streams.add(stop); res.on('close', toolClose)
+  } })
+  // `held` tells ONE requesting device whether IT holds the human lease — the
+  // holder identity value itself never leaves the lease.
+  const controlBody = (sessionId: string, holder?: string) => ({ ok: true, sessionId, hostGeneration: host!.scopes.generation, control: { ...host!.control.status(sessionId), ...(holder !== undefined ? { held: host!.control.heldBy(sessionId, holder) } : {}) } })
+  const scopedDisposers = [EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE, EGO_CONTROL_STATUS_ROUTE, EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE, EGO_CONTROL_ARM_ROUTE, EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE]
+    .map(path => server.register({ kind: 'exact', path, handler: async (reqRaw: unknown, resRaw: unknown) => {
+      const req = reqRaw as IncomingMessage
+      const res = resRaw as ServerResponse
+      const sessionId = sessionFor(req)
+      const body = requestBodies.get(req) ?? {}
+      const holder = typeof body.clientId === 'string' ? body.clientId : undefined
+      if (path === EGO_CONTROL_STATUS_ROUTE) {
+        // GET carries no body: the polling device names itself in the query.
+        const queried = new URL(req.url ?? path, 'http://dsh.internal').searchParams.get('clientId')
+        return sendJson(res, 200, controlBody(sessionId, holder ?? (typeof queried === 'string' && queried.length <= 128 ? queried : undefined)))
+      }
+      const action = path + `:${String(body.leaseEpoch)}`
+      // The once() receipt is keyed to the requesting device (holder): another
+      // device replaying this requestId misses the cache and runs the real
+      // holder checks instead of receiving this device's cached result.
+      const result = await host!.control.once(sessionId, String(body.requestId), action, async () => {
+        if (path === EGO_NAVIGATE_ROUTE) return { ...await host!.navigate(sessionId, String(body.url ?? ''), body.leaseEpoch, body.targetId, holder) as object, sessionId, hostGeneration: host!.scopes.generation }
+        if (path === EGO_CONTEXT_ROUTE) return { ok: true, context: { ...await host!.context(sessionId, body.leaseEpoch, body.targetId, holder) as object, sessionId, hostGeneration: host!.scopes.generation } }
+        if ([EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE].includes(path)) {
+          if (!host!.continuation) throw new ScopeError('continuation-agent-unavailable')
+          const continuation = path === EGO_CONTROL_PREPARE_ROUTE ? await host!.continuation.prepare(sessionId, body.leaseEpoch, holder)
+            : path === EGO_CONTROL_COMMIT_ROUTE ? host!.continuation.commit(sessionId, body.continuationId, body.leaseEpoch, holder)
+            : host!.continuation.abort(sessionId, body.continuationId, body.leaseEpoch, holder)
+          return { ...controlBody(sessionId, holder), continuation }
+        }
+        if (path === EGO_CONTROL_TAKEOVER_ROUTE) await host!.control.takeOver(sessionId, undefined, holder)
+        else if (path === EGO_CONTROL_RELEASE_ROUTE) await host!.control.withHumanDrain(sessionId, body.leaseEpoch,
+          async () => host!.control.release(sessionId, body.leaseEpoch, holder), 5000, holder)
+        return controlBody(sessionId, holder)
+      }, holder)
+      return sendJson(res, 200, result)
+    } }))
+
   const disposeSpaces = server.register({
     kind: 'exact',
     path: EGO_SPACES_ROUTE,
-    handler: async (_req: unknown, resRaw: unknown) => {
+    handler: async (reqRaw: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
+      const sessionId = sessionFor(reqRaw)
+      const binding = host!.scopes.require(sessionId)
+      const count = sessionToolCounts.get(JSON.stringify([host!.scopes.generation, sessionId])) ?? 0
       // Keep the tab-list shape (and the auto-open counter) in the refusal so
       // the client's baseline probe still works while the relay is off.
-      if (relayDisabled()) return refuseFrameRelay(res, { spaces: [], toolCallCount })
+      if (relayDisabled()) return refuseFrameRelay(res, { spaces: [], toolCallCount: count })
       const port = await ensureWorker()
       if (port === null) {
-        return sendJson(res, 200, { ok: false, spaces: [], toolCallCount, reason: 'no live agent browser', frameRelay: true })
+        return sendJson(res, 200, { ok: false, spaces: [], sessionId, hostGeneration: binding.generation, space: { name: binding.name, id: binding.id }, toolCallCount: count, reason: 'no live agent browser', frameRelay: true })
+      }
+      const control = host!.control.status(sessionId)
+      if (control.state === 'human' && control.owned && host!.refreshMembership) {
+        try { await host!.refreshMembership(sessionId, control.leaseEpoch) }
+        catch (error) { if (!(error instanceof ScopeError) || error.code !== 'control-busy') throw error }
       }
       const data = await proxyFrom(port, '/api/spaces')
-      if (!data) return sendJson(res, 200, { ok: false, spaces: [], toolCallCount, reason: 'worker not ready', frameRelay: true })
+      if (!data) return sendJson(res, 200, { ok: false, spaces: [], toolCallCount: count, reason: 'worker not ready', frameRelay: true })
       // Attach the host-side tool-call counter (the worker doesn't know about
       // tool invocations; only the host's defineEgoTool path does).
-      return sendJson(res, 200, { ...(data as Record<string, unknown>), toolCallCount, frameRelay: true })
+      const spaces = (data as { spaces?: Array<{ targetId?: string }> }).spaces ?? []
+      return sendJson(res, 200, { ok: true, sessionId, hostGeneration: binding.generation, space: { name: binding.name, id: binding.id }, spaces: spaces.filter(tab => binding.targets.has(tab.targetId ?? '')), toolCallCount: count, frameRelay: true })
     },
   })
 
@@ -623,18 +1054,109 @@ export function initCastServer(
   const disposeStream = server.register({
     kind: 'exact',
     path: EGO_STREAM_ROUTE,
-    handler: async (_req: unknown, resRaw: unknown) => {
+    handler: async (reqRaw: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
-      // Relay off: never open an event stream. A plain JSON body with an
-      // explicit reason is the answer (no dangling connection, no
-      // reconnect-loop ambiguity once the client honors it).
-      if (relayDisabled()) return refuseFrameRelay(res)
-      const port = await ensureWorker()
-      if (port === null) {
-        proxyWorkerStream(-1, res, '/api/stream')
+      const req = reqRaw as IncomingMessage
+      const sessionId = sessionFor(req)
+      const url = new URL(req.url ?? '', 'http://dsh.internal')
+      // Reserve the remote stream slot BEFORE any SSE headers: over-capacity
+      // remote connections get a plain JSON refusal instead of a stream that
+      // would have to be torn down mid-flight. Local requests skip this.
+      const remoteGrant = requestRemote.get(req)
+      const acquired = remoteGrant === undefined ? undefined : acquireRemoteStreamTicket(remoteGrant.expiresAtMs)
+      const remoteTicket = acquired ?? undefined
+      if (remoteGrant !== undefined && remoteTicket === undefined) {
+        return sendJson(res, 429, { ok: false, code: 'remote-stream-capacity', error: 'too many remote streams' })
+      }
+      // The reservation is OWNED from the moment it is granted: ensureWorker()'s
+      // health discovery below can await for seconds, during which the client
+      // may disconnect, the grant deadline may pass or the plugin may unload.
+      // Each of those releases the slot and marks the downstream dead, and the
+      // code after the await never opens a worker stream for it. The ticket
+      // itself is handed to proxyWorkerStream (its owner and releaser) exactly
+      // once, at open time — never both reserved and owned.
+      let reservationGone = false
+      let reservationReleased = false
+      let reservationTimer: NodeJS.Timeout | undefined
+      let reservationStop: () => void = () => {}
+      const clearReservation = (): void => {
+        if (reservationTimer !== undefined) {
+          clearTimeout(reservationTimer)
+          reservationTimer = undefined
+        }
+        streams.delete(reservationStop)
+        res.removeListener('close', reservationStop)
+      }
+      if (remoteTicket !== undefined) {
+        reservationStop = () => {
+          reservationGone = true
+          clearReservation()
+          if (!reservationReleased) {
+            reservationReleased = true
+            releaseRemoteStream()
+          }
+          try {
+            res.end()
+          } catch {
+            /* already closed */
+          }
+        }
+        reservationTimer = setTimeout(reservationStop, Math.max(0, remoteTicket.deadlineAtMs - Date.now()))
+        reservationTimer.unref?.()
+        res.on('close', reservationStop)
+        streams.add(reservationStop)
+      }
+      const openStream = (port: number, targetId?: string) => {
+        // Hand the ticket over: cancel reservation bookkeeping; from here the
+        // stream's own teardown owns and releases the slot.
+        if (remoteTicket !== undefined) clearReservation()
+        let registration: { wrapped: () => void; unregister: () => void } | undefined
+        const stop = proxyWorkerStream(port, res, '/api/stream', {
+          host: host!, sessionId, targetId, remote: remoteTicket,
+          // Stream teardown fully deregisters the route-layer registration
+          // (Set entry + its own close listener) even when the downstream
+          // never flushes or closes.
+          onEnded: () => { registration?.unregister() },
+        })
+        registration = keepStream(stop, res)
+      }
+      // After the discovery await, a closed/expired/unloaded downstream must
+      // not receive a worker stream; its slot was already returned.
+      const reservationAborted = (): boolean => {
+        if (remoteTicket === undefined) return false
+        if (reservationGone || reservationReleased) return true
+        if (Date.now() >= remoteTicket.deadlineAtMs) {
+          reservationStop()
+          return true
+        }
+        return false
+      }
+      if (url.searchParams.get('eventsOnly') === '1') {
+        openStream(-1)
         return
       }
-      proxyWorkerStream(port, res, '/api/stream')
+      // Relay off: never open an event stream. A plain JSON body with an
+      // explicit reason is the answer (no dangling connection, no
+      // reconnect-loop ambiguity once the client honors it). A reserved
+      // remote ticket was never handed to proxyWorkerStream (its owner and
+      // releaser), so return it here.
+      if (relayDisabled()) {
+        if (remoteTicket !== undefined) {
+          clearReservation()
+          if (!reservationReleased) {
+            reservationReleased = true
+            releaseRemoteStream()
+          }
+        }
+        return refuseFrameRelay(res)
+      }
+      const port = await ensureWorker()
+      if (reservationAborted()) return
+      if (port === null) {
+        openStream(-1, url.searchParams.get('targetId') ?? undefined)
+        return
+      }
+      openStream(port, url.searchParams.get('targetId') ?? undefined)
     },
   })
 
@@ -649,9 +1171,22 @@ export function initCastServer(
       const res = resRaw as ServerResponse
       if (relayDisabled()) return refuseFrameRelay(res, { error: FRAME_RELAY_DISABLED })
       const port = await ensureWorker()
+      // Worker health discovery can await long after authorization; an
+      // expired grant never reaches the input/close dispatch.
+      if (remoteGrantExpired(req)) return refuseExpiredRemote(res)
       if (port === null) return sendJson(res, 400, { ok: false, error: 'no live agent browser' })
       const body = await readJsonBody(req).catch(() => ({}) as Record<string, unknown>)
-      const result = await proxyPost(port, '/api/input', body)
+      const sessionId = sessionFor(reqRaw)
+      const result = await host!.control.runHumanInput(sessionId, body.leaseEpoch, body.inputSeq, String(body.requestId), async () => {
+        host!.control.noteInput(body, false)
+        const response = await proxyPost(port, '/api/input', body)
+        if (!response || response.status >= 400 || (response.body as { ok?: boolean })?.ok !== true) {
+          host!.control.humanOutcomeUnverified(sessionId)
+          throw new ScopeError('input-outcome-unverified')
+        }
+        host!.control.noteInput(body, true)
+        return response
+      }, typeof body.clientId === 'string' ? body.clientId : undefined)
       if (!result) return sendJson(res, 502, { ok: false, error: 'input worker unavailable' })
       return sendJson(res, result.status, result.body)
     },
@@ -666,13 +1201,18 @@ export function initCastServer(
       const res = resRaw as ServerResponse
       if (relayDisabled()) return refuseFrameRelay(res, { error: FRAME_RELAY_DISABLED })
       const port = await ensureWorker()
+      // Worker health discovery can await long after authorization; an
+      // expired grant never reaches the input/close dispatch.
+      if (remoteGrantExpired(req)) return refuseExpiredRemote(res)
       if (port === null) return sendJson(res, 400, { ok: false, error: 'no live agent browser' })
       // Collect the request body (small JSON: { targetId }).
       const body = await readJsonBody(req).catch(() => ({}) as Record<string, unknown>)
       const targetId = typeof body.targetId === 'string' ? body.targetId : ''
       if (!targetId) return sendJson(res, 400, { ok: false, error: 'targetId required' })
-      const result = await proxyPost(port, '/api/close', { targetId })
+      const sessionId = sessionFor(reqRaw)
+      const result = await host!.control.once(sessionId, String(body.requestId), 'close', () => host!.control.runHuman(sessionId, body.leaseEpoch, () => proxyPost(port, '/api/close', { targetId }), typeof body.clientId === 'string' ? body.clientId : undefined), typeof body.clientId === 'string' ? body.clientId : undefined)
       if (!result) return sendJson(res, 502, { ok: false, error: 'close worker unavailable' })
+      if (result.status < 400 && (result.body as { ok?: boolean })?.ok === true) host!.scopes.forgetTarget(sessionId, targetId)
       return sendJson(res, result.status, result.body)
     },
   })
@@ -741,13 +1281,13 @@ export function initCastServer(
   const disposeHealth = server.register({
     kind: 'exact',
     path: EGO_HEALTH_ROUTE,
-    handler: async (_req: unknown, resRaw: unknown) => {
+    handler: async (reqRaw: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
       if (relayDisabled()) return refuseFrameRelay(res, { error: FRAME_RELAY_DISABLED })
       const port = await ensureWorker()
       if (port === null) return sendJson(res, 200, { ok: false })
       const h = await proxyFrom(port, '/api/health')
-      return sendJson(res, 200, h || { ok: false })
+      return sendJson(res, 200, { ok: !!h, workerOk: (h as { workerOk?: boolean } | null)?.workerOk === true, sessionId: sessionFor(reqRaw) })
     },
   })
 
@@ -762,9 +1302,11 @@ export function initCastServer(
       const res = resRaw as ServerResponse
       if (relayDisabled()) return refuseFrameRelay(res, { error: FRAME_RELAY_DISABLED, state: 'disabled' })
       const port = await ensureWorker()
+      if (remoteGrantExpired(req)) return refuseExpiredRemote(res)
       if (port === null) return sendJson(res, 409, { ok: false, error: 'worker not ready' })
       const timeoutMs = workerPath === '/api/watch/start' || workerPath === '/api/watch/switch' ? 30000 : 4000
-      const result = await proxyPost(port, workerPath, await readJsonBody(req).catch(() => ({})), timeoutMs)
+      const body = await readJsonBody(req)
+      const result = await proxyPost(port, workerPath!, body, timeoutMs)
       return result
         ? sendJson(res, result.status, result.body)
         : sendJson(res, 502, { ok: false, error: 'worker request failed' })
@@ -772,14 +1314,23 @@ export function initCastServer(
   }))
   const disposeWatchStatus = server.register({
     kind: 'exact', path: EGO_WATCH_STATUS_ROUTE,
-    handler: async (_req: unknown, resRaw: unknown) => {
+    handler: async (reqRaw: unknown, resRaw: unknown) => {
       const res = resRaw as ServerResponse
       // The client calls this right before opening the SSE stream; the
       // `frameRelay: false` flag is what makes it skip the connection entirely.
       if (relayDisabled()) return refuseFrameRelay(res, { error: FRAME_RELAY_DISABLED, state: 'disabled' })
       const port = await ensureWorker()
       const result = port === null ? null : await proxyFrom(port, '/api/watch/status')
-      return sendJson(res, 200, { ...(result || { ok: false, state: 'idle', reason: 'worker not ready' }), frameRelay: true })
+      const value = result as { targetId?: string } | null
+      const binding = host!.scopes.require(sessionFor(reqRaw))
+      return sendJson(res, 200, { ...(value?.targetId && binding.targets.has(value.targetId) ? result as object : { ok: false, state: 'idle', reason: 'no owned capture target' }), frameRelay: true,
+        // Read-only classification aid for the panel: an EventSource connect
+        // failure exposes no HTTP status/body, so the client probes this route
+        // once to tell a 429 remote-stream-capacity refusal from a channel
+        // loss. The flag grants nothing and reserves nothing — capacity is
+        // still enforced only at the stream routes, and local streams (which
+        // never consume remote slots) always read false.
+        remoteStreamFull: requestRemote.has(reqRaw as IncomingMessage) && activeRemoteStreams() >= REMOTE_MAX_STREAMS })
     },
   })
   const disposeVideoStatus = server.register({
@@ -800,12 +1351,16 @@ export function initCastServer(
       // Never start the ffmpeg pull / fMP4 bridge while the relay is off.
       if (relayDisabled()) return refuseFrameRelay(res)
       const port = await ensureWorker()
+      if (remoteGrantExpired(req)) return refuseExpiredRemote(res)
       if (port === null) return sendJson(res, 502, { ok: false, error: 'worker not ready' })
       proxyWorkerVideo(port, req, res)
     },
   })
 
   ctx.effect?.(() => () => {
+    try { disposeToolEvents() } catch { /* ignore */ }
+    for (const stop of streams) stop()
+    for (const dispose of scopedDisposers) try { dispose() } catch { /* ignore */ }
     try { disposeSpaces() } catch { /* ignore */ }
     try { disposeStream() } catch { /* ignore */ }
     try { disposeInput() } catch { /* ignore */ }

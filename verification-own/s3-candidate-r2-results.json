@@ -1,0 +1,63 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "step": "s3-candidate-r2",
+  "date": "2026-10-04",
+  "supersedes": "verification-own/s3-candidate-results.json (kept unchanged as history; this record corrects its claims rather than overwriting them)",
+  "review": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/verification/s3/REVIEW-S3-R1.md",
+  "correction1_acceptedS2Evidence": {
+    "claim_was": "The R1 record wrongly listed physical iPhone Chinese, real Access/WAN, mutual exclusion/release, application revocation and recovery as unexecuted or NOT PASSED.",
+    "actual": "These were accepted S2 real R9-R12 evidence with direct user approval (immutable ACTIVATION-REVIEW-R12.md and source copies). All of the following PASSED as S2 evidence on the R12-reviewed candidate and its old installed bytes (rc2.5 line, R8 public installation slot) — they are NOT passes of the new S3 package:",
+    "items": [
+      "Physical iPhone Chinese input and draft: user replied the draft was preserved and the full Chinese text appeared in the page; the first device live JPEG frame showed the complete verification text. Native composition events were not captured and no complete root-cause claim is made. The phone browser name/version was NOT supplied — Safari must not be assumed.",
+      "Phone release and first-device regain: real takeover HTTP 200, state human, held true, epoch 10 after the phone explicit release.",
+      "Real-device mutual exclusion: verified live phone lease (epoch 12, about 88s remaining) followed by a real 409 lease-held-elsewhere takeover refusal with the other device draft/remote keys disabled.",
+      "Physical iPhone WAN disconnect and reconnect (airplane mode + Wi-Fi off): page paused, draft preserved, no automatic input; the first device page still showed the original Chinese.",
+      "Real application token revocation: through the existing logged-in Cloudflare Zero Trust admin, dashboard POST revoke-tokens on the exact Canary application (47e9be33-9c51-4ac0-a882-a63081620f19) returned 202 success true, scoped to that application only.",
+      "Post-revocation fail-closed on both devices (paused, frame cleared, takeover/draft disabled) and recovery: Access SSO re-authentication with no new code entry (same pinned owner/issuer/audience RS256/JWKS proof, same live boot), still paused/passive, then explicit takeover 200 human held true epoch 14 with draft enabled, and explicit release back to preview epoch 15.",
+      "Fifth remote stream refusal 429 remote-stream-capacity with no frames/input, and slot release after closing one stream page (200/frames resumed). Same-device concurrency evidence, not a substitute for physical dual-device coverage."
+    ],
+    "s3Boundary": "The NEW S3 versions (dsh-remote.1 and dsh-remote.2) have NOT had their own physical or public update, real joint browser test, business-model Ego run or website OAuth. Website OAuth remains NOT RUN; true business-model automatic Ego selection/execution remains NOT VERIFIED. Old S2 passes must not be relabeled as new S3 passes."
+  },
+  "correction2_docLifecycle": {
+    "file": "docs/DSH-REMOTE-ACCESS.md",
+    "was": "Said nothing reconnects by itself and human control always needs another explicit takeover after re-auth.",
+    "now": "Matches the implemented code: passive picture recovery retries boundedly (at most three consecutive attempts, then parked until the status channel recovers) and reconnects only once a request passes authorization again; authentication alone never grants control — authority returns only through a fresh requester-bound receipt (a status poll or takeover answer naming this device, held true, current generation+epoch); a still-valid same-client human lease may be re-proved by such a receipt without a new takeover, and an explicit takeover is required only when the lease is absent, expired or held by another device. No draft, queued input, main Conversation or Agent execution is ever implicitly replayed or resumed. Notes that accepted R12 recovery observed the first device passive and did not establish a blanket always-passive same-client lease guarantee. Application revocation is described through the protected Access edge (the origin verifies each freshly presented assertion and keeps no revocation list), not as an origin-side revocation list.",
+    "sourceChanges": "none — documentation wording only; no runtime/control/auth semantic change"
+  },
+  "correction3_tarballClaim": {
+    "was": "The R1 record said the commit included the tarball.",
+    "actual": "*.tgz is gitignored (git check-ignore: .gitignore line 2); git ls-files verification-own/*.tgz is empty. The remote.1 tarball is a separately stored physical artifact pinned by hash (b52b91ceebbde0e379752966e769a86827be8689ddd36330c14028dc7356b7a0, 327460 bytes, re-verified unchanged after this round), not tracked in commit cc1123435dee829fa934ea66a2f12263a7f3f405. Commit and remote.1 archive both preserved unchanged."
+  },
+  "version": {
+    "new": "0.8.6-dsh-remote.2",
+    "prior": "0.8.6-dsh-remote.1 (commit cc1123435dee829fa934ea66a2f12263a7f3f405 and its tarball preserved)",
+    "unchanged": ["jose 6.2.3 exact pin", "peerDependencies 0.1.1-rc.2", "no Core upgrade", "no source runtime change"]
+  },
+  "commands": [
+    { "cmd": "npm run typecheck", "result": "pass (both tsconfig projects, no errors)" },
+    { "cmd": "npm run build", "result": "pass; lib/ bundle bytes unchanged from the remote.1 build (version is not embedded), so only docs/DSH-RC2-ADAPTATION.md, docs/DSH-REMOTE-ACCESS.md and package.json were dirty" },
+    { "cmd": "npm pack --pack-destination verification-own", "result": "dsh-ego-browser-0.8.6-dsh-remote.2.tgz created; remote.1 archive untouched" },
+    { "cmd": "certutil -hashfile remote.1.tgz SHA256 (re-verify)", "result": "b52b91ceebbde0e379752966e769a86827be8689ddd36330c14028dc7356b7a0 — unchanged" },
+    { "cmd": "tar content closure", "result": "51 files; package.json version 0.8.6-dsh-remote.2 with jose 6.2.3; lib/index.js, lib/client.js, bin/ego-cast-worker.mjs, docs/DSH-RC2-ADAPTATION.md, docs/DSH-REMOTE-ACCESS.md (with corrected lifecycle wording), THIRD_PARTY_NOTICES.md, dsh-plugin.json all present" }
+  ],
+  "tests": "No full runtime suite repeated: this round changed documentation, package metadata and packaging only, with no source/runtime change (per REVIEW-S3-R1 direction). Codex independently ran the full plugin suite on commit cc11234 sources: 324 passed / 0 failed / 5 skipped; the runtime files are byte-identical in remote.2.",
+  "tarball": {
+    "location": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3-remote/ego/verification-own/dsh-ego-browser-0.8.6-dsh-remote.2.tgz",
+    "bytes": 328019,
+    "sha256": "7aaefb7653ec86029f4f528a003e81cb04791051b1350b5c486ccb0d6650250a",
+    "npmShasum": "2d40019418988d73a7d63d4b8b104397cae59ef2",
+    "files": 51,
+    "storedAs": "untracked physical artifact (gitignored *.tgz), pinned by this hash; not part of the git commit"
+  },
+  "remainingGates": [
+    "Codex joint mirror/Profile assembly, real joint browser load, regression and new-to-old-to-new rollback drill — NOT RUN",
+    "physical/public update of the NEW S3 package and re-test of iPhone Chinese behavior on it — NOT RUN",
+    "true business-model automatic Ego selection/execution — NOT VERIFIED",
+    "real target-website provider OAuth — NOT RUN",
+    "900px main-conversation top bar, remote workspace registration, Workbench new-context 409 joint checks — NOT RUN",
+    "real-browser computed font-size verification — NOT RUN",
+    "CI — NOT RUN",
+    "no push/PR/merge/npm publish/tag change performed"
+  ],
+  "claims": "Bounded S3 R2 documentation/packaging handoff. NOT S3 user acceptance, NOT a formal release. Old verification evidence and the R1 record are unchanged; this file supersedes the R1 claims listed above."
+}

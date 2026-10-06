@@ -15,7 +15,7 @@ const json = (res, body, status) => {
 }
 const server = http.createServer((req, res) => {
   const path = String(req.url || '').split('?')[0]
-  if (path === '/api/health') return json(res, { ok: true })
+  if (path === '/api/health') return json(res, { workerOk: true, pid: process.pid, bootId: 'fixture-worker-boot-' + process.pid, profileDir: '' })
   if (path === '/api/spaces') return json(res, { ok: true, spaces: [{ targetId: 'tab-1' }] })
   if (path === '/api/watch/status') return json(res, { ok: true, state: 'streaming' })
   if (path === '/api/config') return json(res, { ok: true })

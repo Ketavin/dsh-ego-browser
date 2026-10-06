@@ -51,7 +51,9 @@ function mountGateway(initial: Record<string, unknown>) {
     },
   };
   const ctx = {
-    get: (name: string) => (name === "webServer" ? server : undefined),
+    get: (name: string) => name === "webServer" ? server : name === "connection" ? {
+      requestRejection: () => undefined,
+    } : undefined,
     effect: (fn: () => unknown) => fn(),
     inject: (_services: readonly string[], cb: (sctx: Record<string, unknown>) => unknown) => cb({ settings }),
   };

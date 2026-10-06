@@ -1,0 +1,53 @@
+{
+  "task": "dsh-ego-remote-20261003",
+  "round": "S2 attempt6 mobile Chinese-input repair (REVIEW-S2-MOBILE-R6 / ACTIVATION-REVIEW-R6)",
+  "date": "2026-10-04",
+  "node_path_workaround_child_only": "E:/Projects/DSH-Sandbox/sidebar-fusion-20261003/p3/sidebar/node_modules",
+  "head": "22a229245ec336fb4a132e88e312221575b5d5b8 (unchanged, no reset/clean/commit/push)",
+  "version": "0.8.6-dsh-rc2.5 (unchanged; version/publishing is s3)",
+  "finding": "The pre-R6 keyboard surface mirrored keystrokes and cleared event.target.value unconditionally (including on a no-op sendInput early-return and before the asynchronous reply); the dispatcher silently dropped stale captures returning void, so the editor could not distinguish delivery, refusal, drop or transport ambiguity. Physical evidence: Chinese text disappears on iPhone after takeover; frame viewing and reverse contention (409 lease-held-elsewhere) already work.",
+  "fix": [
+    "src/client/rc2-bridge.ts: createKeyboardInput removed; DRAFT_TEXT_LIMIT(4000), hostErrorCode (dash-code classifier), InputTextOutcome (sent|stale|refused|unconfirmed) and dispatcher.submitText added — one bounded ordered insertText with admission-at-dispatch and explicit reply classification; a host code ending -unverified/-unconfirmed is ambiguity, not refusal",
+    "src/client/rc2-client.ts: persistent native draft textarea (IME/selection/paste/local editing never dispatch piecewise and never auto-clear); explicit 输入到网页 send; 回车/退格/Tab/Esc buttons send ordered keyDown+keyUp pairs; touch (non-mouse pointerType) frame taps no longer focus the draft editor; draft revision counter and origin stamp — sent clears only an unedited draft (same-value re-edit preserved), a real session/target/generation change clears, a fail-closed channel wipe quarantines intact, and a draft never sends to a page other than its origin"
+  ],
+  "typecheck": { "command": "npm run typecheck", "exit": 0, "configs": ["tsconfig.json", "tsconfig.client.json"] },
+  "full_plugin_suite": {
+    "command": "NODE_PATH=<child-only sidebar node_modules> npx vitest run (cwd ego)",
+    "test_files": "36 passed | 1 skipped (37)",
+    "tests": "319 passed | 0 failed | 5 skipped (324)",
+    "skips_are_infra": "tests/login-import-e2e.test.ts (5 tests) skip without a real Chrome/profile environment; unchanged from prior rounds",
+    "delta_vs_r4": "+11: tests/rc2-bridge.test.ts replaced the single IME mirror test with 2 draft-outcome tests (23 total in file), tests/rc2-client-lifecycle.test.ts 13 -> 23 (10 new draft/touch/viewer regressions) (308 -> 319)",
+    "mid_round_failures_resolved": [
+      "fixture type()/editText must set the textarea value via the prototype native setter — React 18's instance valueTracker dedupes direct .value assignment so onChange never fired and the first 6 new lifecycle tests failed against a disabled send button",
+      "fixture input route now answers the gated POST per lease state at REPLY time (late holder change resolves lease-holder-mismatch), and one assertion corrected to count attempted POSTs (refused/network attempts are recorded too)"
+    ]
+  },
+  "codex_suites_read_only_unmodified": {
+    "slow_refresh": { "config": "p3-remote/verification/s2/codex-slow-refresh.config.ts", "tests": "1 passed | 0 failed (1)" },
+    "extension_seams": { "config": "p3-remote/verification/s2/codex-extension-seams.config.ts", "tests": "2 passed | 0 failed (2)" },
+    "all_boundaries": { "config": "p3-remote/verification/s2/codex-all-boundaries.config.ts", "tests": "11 passed | 0 failed (11)" },
+    "device_cache": { "config": "p3-remote/verification/s2/codex-device-cache.config.ts", "tests": "4 passed | 0 failed (4)" },
+    "final_boundaries": { "config": "p3-remote/verification/s2/codex-final-boundaries.config.ts", "tests": "14 passed | 0 failed (14)" },
+    "mobile_independent": {
+      "config": "p3-remote/verification/s2/codex-mobile-independent.config.ts",
+      "tests": "5 passed | 0 failed (5)",
+      "note": "Codex's own independent R6 suite (not edited by me). First run was 1 passed | 4 failed; the four failures drove three real fixes: input-outcome-unverified classified as unconfirmed (not refused), draft clearing keyed on a revision counter instead of text identity (same-value re-edit preserved), and a fail-closed channel wipe quarantines the draft instead of erasing it (draft origin also blocks sending to another page)"
+    }
+  },
+  "build": { "command": "npm run build", "exit": 0, "lib_index_js_kB": 229.60, "worker_mjs_kB": 184.91 },
+  "nul_byte_scan": "0 NUL bytes in src/client/rc2-bridge.ts, src/client/rc2-client.ts, tests/rc2-bridge.test.ts, tests/rc2-client-lifecycle.test.ts, lib/client.js, lib/index.js",
+  "changed_this_round": [
+    "src/client/rc2-bridge.ts",
+    "src/client/rc2-client.ts",
+    "tests/rc2-bridge.test.ts",
+    "tests/rc2-client-lifecycle.test.ts",
+    "docs/DSH-RC2-ADAPTATION.md (rc2.5 mobile-input paragraph)",
+    "verification-own/s2-mobile-r6-results.json",
+    "lib/ build artifacts"
+  ],
+  "not_run": [
+    "REAL iPhone / iOS Safari IME verification NOT RUN — all mobile-input evidence here is controlled jsdom/React and exported-function testing; actual device acceptance belongs to Codex/human physical testing and remains PENDING",
+    "true Cloudflare Access/WAN/second physical device (joint hard gate; Canary plan UNAPPROVED/NOT ACTIVE)",
+    "real provider OAuth/login import, actual accounts"
+  ]
+}
