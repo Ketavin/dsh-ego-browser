@@ -28,6 +28,11 @@ async function harness() {
   const continuation = new ContinuationGate(scopes, control, id => id === 'A' ? agent : undefined)
   cleanup.push(() => continuation.dispose())
   const host: ScopedBrowserHost = { scopes, control, runtimeEnv: env, navigate, context, continuation,
+    canRecover(id) { const owner = control.ownerSession(); return control.status(id).recoveryRequired && (owner === id || (owner !== undefined && !live.has(owner))) },
+    async recover(id, epoch, holder) {
+      if (!host.canRecover!(id)) throw new ScopeError('lease-not-owned')
+      return control.recover(id, epoch, holder, async () => { scopes.resetBrowser(); scopes.bind(id) }, control.ownerSession() !== id)
+    },
     validateSession(id) {
       if (typeof id !== 'string' || !live.has(id)) throw new ScopeError('session-not-live')
       scopes.bind(id); return id
@@ -67,6 +72,31 @@ async function harness() {
 }
 
 describe('scoped HTTP host routes (loopback fixtures, no browser)', () => {
+  it('requires current generation, epoch, device and session for recovery; invalidates every old target', async () => {
+    const h = await harness()
+    await expect(h.host.control.runAgent('A', undefined, async () => { throw Error('unknown outcome') })).rejects.toThrow()
+    const generation = h.host.scopes.generation, epoch = h.host.control.status('A').leaseEpoch
+    const body = { sessionId: 'A', clientId: 'device-1', requestId: 'recover', hostGeneration: generation, leaseEpoch: epoch }
+    expect((await (await h.post('/api/ego/control/recover', { ...body, hostGeneration: undefined })).json()).code).toBe('host-generation-required')
+    expect((await (await h.post('/api/ego/control/recover', { ...body, clientId: undefined })).json()).code).toBe('client-id-required')
+    expect((await (await h.post('/api/ego/control/recover', { ...body, sessionId: 'B', requestId: 'foreign' })).json()).code).toBe('lease-not-owned')
+    expect((await (await h.post('/api/ego/control/recover', { ...body, leaseEpoch: epoch - 1, requestId: 'stale' })).json()).code).toBe('lease-epoch-stale')
+    const recovered = await (await h.post('/api/ego/control/recover', body)).json()
+    expect(recovered.control).toMatchObject({ state: 'human', held: true, recoveryRequired: false })
+    expect(recovered.hostGeneration).not.toBe(generation)
+    expect(h.host.scopes.require('A').targets.size).toBe(0)
+    expect((await (await h.post('/api/ego/input', { ...body, targetId: 'target-A', inputSeq: 1, type: 'insertText', text: 'old' })).json()).code).toBe('host-generation-stale')
+    expect(h.workerBodies).toHaveLength(0)
+  })
+  it('permits recovery of a disposed owner only after the Host confirms the owner is no longer live', async () => {
+    const h = await harness()
+    await expect(h.host.control.runAgent('A', undefined, async () => { throw Error('unknown') })).rejects.toThrow()
+    h.live.delete('A'); h.host.control.revoke('A'); h.host.scopes.revoke('A')
+    const result = await (await h.post('/api/ego/control/recover', { sessionId: 'B', clientId: 'b', requestId: 'orphan',
+      hostGeneration: h.host.scopes.generation, leaseEpoch: h.host.control.status('B').leaseEpoch })).json()
+    expect(result.control).toMatchObject({ state: 'human', sessionId: 'B', held: true })
+    expect(() => h.host.scopes.bind('A')).toThrow('session-disposed')
+  })
   it('keeps the Host trust fence ahead of scope handling and rejects missing or dead sessions', async () => {
     const h = await harness()
     expect((await h.read('/api/ego/spaces?sessionId=A', false)).status).toBe(403)

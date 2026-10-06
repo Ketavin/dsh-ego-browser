@@ -126,6 +126,8 @@ export interface ScopedBrowserHost {
   control: import('./control-lease.ts').ControlLease
   runtimeEnv?: NodeJS.ProcessEnv
   continuation?: import('./continuation-gate.ts').ContinuationGate
+  recover?(sessionId: string, leaseEpoch: unknown, holder: string): Promise<unknown>
+  canRecover?(sessionId: string): boolean
   validateSession(sessionId: unknown): string
   navigate(sessionId: string, url: string, leaseEpoch?: unknown, targetId?: unknown, holder?: string): Promise<unknown>
   context(sessionId: string, leaseEpoch?: unknown, targetId?: unknown, holder?: string): Promise<unknown>

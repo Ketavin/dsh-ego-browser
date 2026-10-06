@@ -43,6 +43,7 @@ export const EGO_CONTEXT_ROUTE = '/api/ego/context'
 export const EGO_CONTROL_STATUS_ROUTE = '/api/ego/control/status'
 export const EGO_CONTROL_TAKEOVER_ROUTE = '/api/ego/control/takeover'
 export const EGO_CONTROL_RELEASE_ROUTE = '/api/ego/control/release'
+export const EGO_CONTROL_RECOVER_ROUTE = '/api/ego/control/recover'
 export const EGO_CONTROL_ARM_ROUTE = '/api/ego/control/arm'
 export const EGO_CONTROL_PREPARE_ROUTE = '/api/ego/control/prepare-continue'
 export const EGO_CONTROL_COMMIT_ROUTE = '/api/ego/control/commit-continue'
@@ -792,7 +793,7 @@ export function initCastServer(
   // same-session reads (spaces/SSE/watch status) stay open to every device.
   const clientIdentityRoutes = new Set([
     EGO_INPUT_ROUTE, EGO_CLOSE_ROUTE, EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE,
-    EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE,
+    EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE, EGO_CONTROL_RECOVER_ROUTE,
     EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE,
   ])
   const guardHandler = (path: string, handler: NonNullable<RegisterRouteOptions['handler']>) =>
@@ -852,6 +853,7 @@ export function initCastServer(
         if ([EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE].includes(path) && body?.targetId !== undefined) host.scopes.assertTarget(sessionId, body.targetId)
         if ([EGO_INPUT_ROUTE, EGO_CLOSE_ROUTE].includes(path)) host.control.assertHuman(sessionId, body?.leaseEpoch, typeof body?.clientId === 'string' ? body.clientId : undefined)
         if (path === EGO_CONTROL_TAKEOVER_ROUTE && body?.leaseEpoch !== undefined && body.leaseEpoch !== host.control.status(sessionId).leaseEpoch) throw new ScopeError('lease-epoch-stale')
+        if (path === EGO_CONTROL_RECOVER_ROUTE && generation !== host.scopes.generation) throw new ScopeError('host-generation-required')
         if (path === EGO_STREAM_ROUTE && url.searchParams.get('eventsOnly') !== '1') host.scopes.assertTarget(sessionId, url.searchParams.get('targetId'))
         if ([EGO_WATCH_START_ROUTE, EGO_WATCH_SWITCH_ROUTE, EGO_WATCH_STOP_ROUTE].includes(path)) {
           if (typeof body?.clientId !== 'string' || !body.clientId || body.clientId.length > 128) throw new ScopeError('client-id-required')
@@ -984,8 +986,8 @@ export function initCastServer(
   } })
   // `held` tells ONE requesting device whether IT holds the human lease — the
   // holder identity value itself never leaves the lease.
-  const controlBody = (sessionId: string, holder?: string) => ({ ok: true, sessionId, hostGeneration: host!.scopes.generation, control: { ...host!.control.status(sessionId), ...(holder !== undefined ? { held: host!.control.heldBy(sessionId, holder) } : {}) } })
-  const scopedDisposers = [EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE, EGO_CONTROL_STATUS_ROUTE, EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE, EGO_CONTROL_ARM_ROUTE, EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE]
+  const controlBody = (sessionId: string, holder?: string) => ({ ok: true, sessionId, hostGeneration: host!.scopes.generation, control: { ...host!.control.status(sessionId), canRecover: host!.canRecover?.(sessionId) ?? false, ...(holder !== undefined ? { held: host!.control.heldBy(sessionId, holder) } : {}) } })
+  const scopedDisposers = [EGO_NAVIGATE_ROUTE, EGO_CONTEXT_ROUTE, EGO_CONTROL_STATUS_ROUTE, EGO_CONTROL_TAKEOVER_ROUTE, EGO_CONTROL_RECOVER_ROUTE, EGO_CONTROL_RELEASE_ROUTE, EGO_CONTROL_ARM_ROUTE, EGO_CONTROL_PREPARE_ROUTE, EGO_CONTROL_COMMIT_ROUTE, EGO_CONTROL_ABORT_ROUTE]
     .map(path => server.register({ kind: 'exact', path, handler: async (reqRaw: unknown, resRaw: unknown) => {
       const req = reqRaw as IncomingMessage
       const res = resRaw as ServerResponse
@@ -1011,7 +1013,10 @@ export function initCastServer(
             : host!.continuation.abort(sessionId, body.continuationId, body.leaseEpoch, holder)
           return { ...controlBody(sessionId, holder), continuation }
         }
-        if (path === EGO_CONTROL_TAKEOVER_ROUTE) await host!.control.takeOver(sessionId, undefined, holder)
+        if (path === EGO_CONTROL_RECOVER_ROUTE) {
+          if (!host!.recover) throw new ScopeError('recovery-unavailable')
+          await host!.recover(sessionId, body.leaseEpoch, holder!)
+        } else if (path === EGO_CONTROL_TAKEOVER_ROUTE) await host!.control.takeOver(sessionId, undefined, holder)
         else if (path === EGO_CONTROL_RELEASE_ROUTE) await host!.control.withHumanDrain(sessionId, body.leaseEpoch,
           async () => host!.control.release(sessionId, body.leaseEpoch, holder), 5000, holder)
         return controlBody(sessionId, holder)

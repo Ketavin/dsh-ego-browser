@@ -866,7 +866,7 @@ describe('mounted rc.2 Sidebar lifecycle', () => {
     // A desktop click focuses the PAGE keyboard region (the image), not the
     // draft editor: following Ctrl+A/arrows act on the page, never the draft.
     await f.tapFrame('pointerdown', 'mouse', 200, 120)
-    expect(f.container.ownerDocument.activeElement).toBe(image)
+    expect(f.container.ownerDocument.activeElement).toBe(f.container.querySelector('[aria-label="直接输入网页（支持中文和粘贴）"]'))
   })
 
   it('keeps a viewer read-only: draft actions stay disabled and nothing is dispatched', async () => {
@@ -939,7 +939,7 @@ describe('mounted rc.2 Sidebar lifecycle', () => {
     Object.assign(image, { getBoundingClientRect: () => ({ left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300 }) })
     await f.tapFrame('pointerdown', 'mouse', 200, 120)
     await f.tapFrame('pointerup', 'mouse', 200, 120, 0)
-    expect(f.container.ownerDocument.activeElement).toBe(image)
+    expect(f.container.ownerDocument.activeElement).toBe(f.container.querySelector('[aria-label="直接输入网页（支持中文和粘贴）"]'))
     // Ctrl+A on the focused page region: exactly one ordered remote down/up
     // pair with the ctrl modifier — after the click's pressed/released pair.
     const ctrlA = { key: 'a', code: 'KeyA', keyCode: 65, ctrlKey: true }

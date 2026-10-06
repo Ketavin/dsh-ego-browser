@@ -100,7 +100,8 @@ export class TargetSessions {
         autoRepeat: !!(payload as { autoRepeat?: unknown }).autoRepeat,
         windowsVirtualKeyCode: virtualKeyCode,
         nativeVirtualKeyCode: virtualKeyCode,
-        ...(type === 'keyDown' && key === 'Enter' ? { text: '\r', unmodifiedText: '\r' } : {}),
+        ...(type === 'keyDown' && key === 'Enter' ? { text: '\r', unmodifiedText: '\r' }
+          : type === 'keyDown' && key.length === 1 && !(Number(modifiers) & 7) ? { text: key, unmodifiedText: key } : {}),
       })
     } else {
       return { ok: false, error: `unsupported input type: ${type}` }

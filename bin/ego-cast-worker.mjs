@@ -36,8 +36,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __require = /* @__PURE__ */ createRequire(import.meta.url);
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/constants.js
-var require_constants = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/constants.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/constants.js
+var require_constants = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/constants.js": ((exports, module) => {
 	const BINARY_TYPES$2 = [
 		"nodebuffer",
 		"arraybuffer",
@@ -60,8 +60,8 @@ var require_constants = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/buffer-util.js
-var require_buffer_util = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/buffer-util.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/buffer-util.js
+var require_buffer_util = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/buffer-util.js": ((exports, module) => {
 	const { EMPTY_BUFFER: EMPTY_BUFFER$3 } = require_constants();
 	const FastBuffer$2 = Buffer[Symbol.species];
 	/**
@@ -161,8 +161,8 @@ var require_buffer_util = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/limiter.js
-var require_limiter = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/limiter.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/limiter.js
+var require_limiter = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/limiter.js": ((exports, module) => {
 	const kDone = Symbol("kDone");
 	const kRun = Symbol("kRun");
 	/**
@@ -213,8 +213,8 @@ var require_limiter = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/permessage-deflate.js
-var require_permessage_deflate = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/permessage-deflate.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/permessage-deflate.js
+var require_permessage_deflate = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/permessage-deflate.js": ((exports, module) => {
 	const zlib = __require("zlib");
 	const bufferUtil = require_buffer_util();
 	const Limiter = require_limiter();
@@ -547,8 +547,8 @@ var require_permessage_deflate = /* @__PURE__ */ __commonJS({ "node_modules/.pnp
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/validation.js
-var require_validation = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/validation.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/validation.js
+var require_validation = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/validation.js": ((exports, module) => {
 	const { isUtf8 } = __require("buffer");
 	const { hasBlob } = require_constants();
 	const tokenChars$2 = [
@@ -744,8 +744,8 @@ var require_validation = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.2
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/receiver.js
-var require_receiver = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/receiver.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/receiver.js
+var require_receiver = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/receiver.js": ((exports, module) => {
 	const { Writable } = __require("stream");
 	const PerMessageDeflate$4 = require_permessage_deflate();
 	const { BINARY_TYPES: BINARY_TYPES$1, EMPTY_BUFFER: EMPTY_BUFFER$2, kStatusCode: kStatusCode$1, kWebSocket: kWebSocket$3 } = require_constants();
@@ -1208,8 +1208,8 @@ var require_receiver = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/sender.js
-var require_sender = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/sender.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/sender.js
+var require_sender = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/sender.js": ((exports, module) => {
 	const { Duplex: Duplex$3 } = __require("stream");
 	const { randomFillSync } = __require("crypto");
 	const { types: { isUint8Array } } = __require("util");
@@ -1706,8 +1706,8 @@ var require_sender = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/event-target.js
-var require_event_target = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/event-target.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/event-target.js
+var require_event_target = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/event-target.js": ((exports, module) => {
 	const { kForOnEventAttribute: kForOnEventAttribute$1, kListener: kListener$1 } = require_constants();
 	const kCode = Symbol("kCode");
 	const kData = Symbol("kData");
@@ -1926,8 +1926,8 @@ var require_event_target = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/extension.js
-var require_extension = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/extension.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/extension.js
+var require_extension = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/extension.js": ((exports, module) => {
 	const { tokenChars: tokenChars$1 } = require_validation();
 	/**
 	* Adds an offer to the map of extension offers or a parameter to the map of
@@ -2070,8 +2070,8 @@ var require_extension = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket.js
-var require_websocket = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket.js
+var require_websocket = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket.js": ((exports, module) => {
 	const EventEmitter$1 = __require("events");
 	const https = __require("https");
 	const http$1 = __require("http");
@@ -3065,8 +3065,8 @@ var require_websocket = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/stream.js
-var require_stream = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/stream.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/stream.js
+var require_stream = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/stream.js": ((exports, module) => {
 	require_websocket();
 	const { Duplex: Duplex$1 } = __require("stream");
 	/**
@@ -3182,8 +3182,8 @@ var require_stream = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/subprotocol.js
-var require_subprotocol = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/subprotocol.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/subprotocol.js
+var require_subprotocol = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/subprotocol.js": ((exports, module) => {
 	const { tokenChars } = require_validation();
 	/**
 	* Parses the `Sec-WebSocket-Protocol` header into a set of subprotocol names.
@@ -3222,8 +3222,8 @@ var require_subprotocol = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket-server.js
-var require_websocket_server = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket-server.js": ((exports, module) => {
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket-server.js
+var require_websocket_server = /* @__PURE__ */ __commonJS({ "../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/lib/websocket-server.js": ((exports, module) => {
 	const EventEmitter = __require("events");
 	const http = __require("http");
 	const { Duplex } = __require("stream");
@@ -3609,7 +3609,7 @@ var require_websocket_server = /* @__PURE__ */ __commonJS({ "node_modules/.pnpm/
 }) });
 
 //#endregion
-//#region node_modules/.pnpm/ws@8.22.0/node_modules/ws/wrapper.mjs
+//#region ../../sidebar-fusion-20261003/p3-ui-fixes/ego/node_modules/.pnpm/ws@8.22.0/node_modules/ws/wrapper.mjs
 var import_stream = /* @__PURE__ */ __toESM(require_stream(), 1);
 var import_extension = /* @__PURE__ */ __toESM(require_extension(), 1);
 var import_permessage_deflate = /* @__PURE__ */ __toESM(require_permessage_deflate(), 1);
@@ -3812,6 +3812,9 @@ var TargetSessions = class {
 				...type === "keyDown" && key === "Enter" ? {
 					text: "\r",
 					unmodifiedText: "\r"
+				} : type === "keyDown" && key.length === 1 && !(Number(modifiers) & 7) ? {
+					text: key,
+					unmodifiedText: key
 				} : {}
 			});
 		} else return {

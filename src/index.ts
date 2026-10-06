@@ -866,11 +866,14 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
       if (tool.name === 'ego_help' || tool.name === 'ego_doctor') return execute(args, exec as never)
       if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
       scopes.arguments(binding, args, tool.name)
-      return withEgoLock(() => control.runAgent(binding.sessionId, exec.signal, async signal => {
+      return withEgoLock(() => {
+        if (binding.generation !== scopes.generation) throw new ScopeError('host-generation-stale')
+        return control.runAgent(binding.sessionId, exec.signal, async signal => {
         const result = await execute(args, { ...exec, signal } as never)
         if (result && typeof result === 'object' && (result as { ok?: boolean }).ok === false) throw new ScopeError('tool-outcome-unverified')
         return result
-      }))
+        })
+      })
     } }
     const dispose = ctx.tools.register(guarded) as unknown as () => void
     // Cordis lifecycle: unregister the tool when the plugin unmounts.
@@ -899,10 +902,38 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
   ctx.inject?.(['webServer', 'connection', 'sessions'], (wctx) => {
     const host: ScopedBrowserHost = {
       scopes, control, runtimeEnv, continuation,
+      canRecover(sessionId) {
+        const owner = control.ownerSession()
+        const sessions = wctx.sessions ?? wctx.get?.('sessions') as EgoContext['sessions']
+        return control.status(sessionId).recoveryRequired
+          && (owner === sessionId || (owner !== undefined && sessions !== undefined && sessions.get(owner)?.id !== owner))
+      },
+      async recover(sessionId, leaseEpoch, holder) {
+        if (!runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
+        if (cfg.egoBin !== fileURLToPath(new URL('../runtime/ego-linux/bin/ego-browser.mjs', import.meta.url))) throw new ScopeError('recovery-runner-unverified')
+        if (!host.canRecover!(sessionId)) throw new ScopeError('lease-not-owned')
+        const replaceDisposedOwner = control.ownerSession() !== sessionId
+        return control.recover(sessionId, leaseEpoch, holder, async () => withEgoLock(async () => {
+          host.validateSession(sessionId)
+          const handle = ctx.subprocess.spawn({
+            argv: [process.execPath, cfg.egoBin, '--stop', '--require-state'], cwd: process.cwd(), env: resolveEgoEnv(cfg),
+            stdio: { stdin: { data: '' }, stdout: { maxBytes: 4096 }, stderr: { maxBytes: 4096 } },
+            graceMs: 15_000, signal: AbortSignal.timeout(20_000),
+          })
+          const outcome = await handle.done
+          if (outcome.exitCode !== 0 || outcome.signal) throw new ScopeError('recovery-stop-unverified')
+          // --stop in the scoped vendored runtime verifies process exit AND
+          // endpoint disappearance before deleting its identity or lock.
+          continuation.dispose()
+          scopes.resetBrowser()
+          host.validateSession(sessionId)
+        }), replaceDisposedOwner)
+      },
       async refreshMembership(sessionId, leaseEpoch) {
         const binding = scopes.require(sessionId)
         if (!runtimeEnv || binding.targets.size === 0) return
         await withEgoLock(() => control.runHuman(sessionId, leaseEpoch, async () => {
+          if (binding.generation !== scopes.generation) throw new ScopeError('host-generation-stale')
           try {
             const result = await runEgoScript(ctx.subprocess,
               `const task = await taskSpaces.switch(${j(binding.name)})\nconsole.log('${SENTINEL}' + JSON.stringify({ ok: true }))\n`,
@@ -928,6 +959,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         const binding = scopes.require(sessionId)
         if (targetId !== undefined) scopes.assertTarget(sessionId, targetId)
         const navigate = async (signal?: AbortSignal) => {
+          if (binding.generation !== scopes.generation) throw new ScopeError('host-generation-stale')
           const result = await runWithStaleSpaceRetry(ctx, cfg, { agent: { session: { id: sessionId } }, signal }, () =>
             `${useSpace(binding.name)}${targetId === undefined ? ensureRealTab() : `await browser.switchTab(${j(targetId)})\n`}await page.goto(${j(parsed.href)}, { wait: true, timeout: 20000 })\n` +
             `console.log('${SENTINEL}' + JSON.stringify({ ok: true, page: await page.info() }))\n`)
@@ -945,6 +977,7 @@ export function apply(ctx: EgoContext, config: RawConfig = {}): void {
         if (!binding.targets.size) throw new ScopeError('owned-page-required')
         if (targetId !== undefined) scopes.assertTarget(sessionId, targetId)
         const read = async (signal?: AbortSignal) => {
+          if (binding.generation !== scopes.generation) throw new ScopeError('host-generation-stale')
           const result = await runWithStaleSpaceRetry(ctx, cfg, { agent: { session: { id: sessionId } }, signal }, () =>
             `${useSpace(binding.name)}${targetId === undefined ? ensureRealTab() : `await browser.switchTab(${j(targetId)})\n`}const info = await page.info()\n` +
             `const text = String(await page.evaluate('document.body ? document.body.innerText : ""')).slice(0, 12000)\n` +
