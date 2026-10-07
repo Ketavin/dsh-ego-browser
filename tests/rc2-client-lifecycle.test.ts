@@ -15,7 +15,7 @@ type Act = (operation: () => void | Promise<void>) => Promise<void>
 type Payload = Record<string, unknown>
 type RequestRecord = { path: string; method: string; sessionId: string; body: Payload; clientKey?: string }
 type Tab = {
-  component(props: { scope: { sessionId: string }; visible: boolean }): import('react').ReactNode
+  component(props: { scope: { sessionId: string }; visible: boolean; contentFocus?: boolean }): import('react').ReactNode
   onOpenUrl?(request: { url: string; requestId: string; scope: { sessionId: string } }): Promise<void>
 }
 type HostState = { generation: string; state: string; epoch: number; targetId: string; holder?: string }
@@ -170,8 +170,8 @@ function harness() {
   const root = createRoot(container)
   let unmounted = false
   const flush = async () => { await act(async () => { for (let i = 0; i < 8; i++) await Promise.resolve() }) }
-  const render = async (sessionId = 'a', visible = true) => {
-    await act(async () => { root.render(tab.component({ scope: { sessionId }, visible })); await Promise.resolve() })
+  const render = async (sessionId = 'a', visible = true, contentFocus = false) => {
+    await act(async () => { root.render(tab.component({ scope: { sessionId }, visible, contentFocus })); await Promise.resolve() })
     await flush()
   }
   const unmount = async () => {
@@ -1113,6 +1113,32 @@ describe('mounted rc.2 Sidebar lifecycle', () => {
     await f.click('输入到网页')
     expect(f.requests.filter(request => request.path === '/api/ego/input').map(request => request.body.text))
       .toEqual(['断网草稿'])
+  })
+
+  it('keeps its human lease, stream, native input and unsent draft when Sidebar collapses chrome', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    await f.click('键盘输入'); await f.type('未提交草稿')
+    const draft = f.container.querySelector('textarea')!
+    const native = f.container.querySelector('.dsh-ego-rc2-direct-input')!
+    const source = f.sources.at(-1)!
+    const requestsBefore = f.requests.length
+    await f.render('a', true, true)
+    expect(f.container.querySelector('.dsh-ego-rc2')!.hasAttribute('data-content-focus')).toBe(true)
+    expect(f.container.querySelector('textarea')).toBe(draft)
+    expect(f.container.querySelector('.dsh-ego-rc2-direct-input')).toBe(native)
+    expect(native.closest('.dsh-ego-rc2-view')).not.toBeNull()
+    expect(f.sources.at(-1)).toBe(source); expect(source.close).not.toHaveBeenCalled()
+    expect(f.requests).toHaveLength(requestsBefore)
+    expect(f.states.get('a')).toMatchObject({ state: 'human', generation: 'host-1', epoch: 4, holder: own })
+    await f.render()
+    expect(f.container.querySelector('.dsh-ego-rc2')!.hasAttribute('data-content-focus')).toBe(false)
+    expect(draft.value).toBe('未提交草稿')
+    expect(f.keyboardPanel().hasAttribute('hidden')).toBe(false)
+    expect(f.requests).toHaveLength(requestsBefore)
   })
 
   it('moves the submit mode into collapsed more-options while keeping steer identifiable outside it', async () => {
