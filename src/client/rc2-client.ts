@@ -116,7 +116,7 @@ export function applyRc2(ctx: ClientContext): void {
     return bridge
   }
 
-  function WatchTab(props: { scope: EgoScope; visible: boolean }) {
+  function WatchTab(props: { scope: EgoScope; visible: boolean; contentFocus?: boolean }) {
     const sessionId = requireScope(props.scope).sessionId
     // The session's stable device identity (shared with the openBrowser
     // callback): it binds the human lease to exactly one device when taking
@@ -611,7 +611,8 @@ export function applyRc2(ctx: ClientContext): void {
     const button = (label: string, run: () => Promise<unknown>, success: string, disabled = false) => h('button', {
       type: 'button', disabled: busy || disabled, onClick: () => { void action(run, success) },
     }, label)
-    return h('div', { className: 'dsh-ego-rc2', 'data-ego-session': sessionId },
+    return h('div', { className: 'dsh-ego-rc2', 'data-ego-session': sessionId,
+      'data-content-focus': props.contentFocus || undefined },
       h('form', { onSubmit: (event: any) => {
         event.preventDefault()
         void action(() => transport.post('/api/ego/navigate', { url, requestId: crypto.randomUUID(),
@@ -758,12 +759,17 @@ export function applyRc2(ctx: ClientContext): void {
         .dsh-ego-rc2-more small{display:block;margin-top:4px}
         .dsh-ego-rc2-mode-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px}
         .dsh-ego-rc2-mode-status{flex-shrink:0;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary)}
+        /* Keep the frame, native input, drafts and stream mounted. Only the
+         * surrounding controls leave layout; Sidebar owns the restore button. */
+        .dsh-ego-rc2[data-content-focus]{padding:0;gap:0;overflow:hidden}
+        .dsh-ego-rc2[data-content-focus]>:not(.dsh-ego-rc2-view){display:none}
+        .dsh-ego-rc2[data-content-focus]>.dsh-ego-rc2-view{min-height:0;border-radius:0}
       `
       document.head.appendChild(style)
       const dispose = sidebar.registerTab({
         id: 'ego-browser:watch', title: 'Agent Browser', order: 70, single: true,
         available: (_ctx: unknown, scope: EgoScope) => sessions.binding(scope.sessionId) !== undefined,
-        component: (props: { scope: EgoScope; visible: boolean }) => h(WatchTab, { ...props, key: props.scope.sessionId }),
+        component: (props: { scope: EgoScope; visible: boolean; contentFocus?: boolean }) => h(WatchTab, { ...props, key: props.scope.sessionId }),
         onOpenUrl: async (request: { url: string; requestId: string; scope: EgoScope }) => {
           // Same stable device identity as the mounted tab (or alone when no
           // tab is mounted yet); navigation only — never a takeover/release.
