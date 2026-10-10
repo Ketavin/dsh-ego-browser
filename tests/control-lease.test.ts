@@ -1,7 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
 import { ControlLease } from '../src/control-lease.ts'
+import { PreDispatchError } from '../src/action-outcome.ts'
 
 describe('shared browser control lease', () => {
+  it('keeps certified pre-dispatch failures correctable without clearing a concurrent cancellation', async () => {
+    const lease = new ControlLease()
+    await expect(lease.runAgent('A', undefined, async () => { throw new PreDispatchError('ambiguous selector') })).rejects.toThrow('ambiguous selector')
+    expect(lease.status('A')).toMatchObject({ state: 'idle', recoveryRequired: false })
+    await lease.runAgent('A', undefined, async () => {})
+    const abort = new AbortController()
+    await expect(lease.runAgent('A', abort.signal, async () => { abort.abort(); throw new PreDispatchError('late preflight') })).rejects.toThrow('late preflight')
+    expect(lease.status('A')).toMatchObject({ state: 'paused', recoveryRequired: true })
+  })
+  it('does not treat an error name or matching locator text as a trusted pre-dispatch proof', async () => {
+    const lease = new ControlLease()
+    await expect(lease.runAgent('A', undefined, async () => {
+      const error = new Error('Locator role:button[name="取消"] matched 2 elements')
+      error.name = 'PreDispatchError'; throw error
+    })).rejects.toThrow('matched 2 elements')
+    expect(lease.status('A')).toMatchObject({ state: 'paused', recoveryRequired: true })
+  })
   it('recovers only after old work settles and the transport reset is proven, with new device/epoch fences', async () => {
     const lease = new ControlLease(), abort = new AbortController()
     let finish!: () => void, stopped!: () => void

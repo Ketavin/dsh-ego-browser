@@ -69,6 +69,7 @@ function harness() {
   let inputNetworkFailures = 0
   // Whether the host would report its remote stream budget as exhausted.
   let remoteStreamsFull = false
+  let continuationBusy = false
   const fetchMock = vi.fn(async (input: RequestInfo | URL, options: RequestInit = {}): Promise<Response> => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://fixture.local')
     const body = options.body ? JSON.parse(String(options.body)) as Payload : {}
@@ -88,6 +89,8 @@ function harness() {
         targetId: typeof body.targetId === 'string' ? body.targetId : state.targetId,
         url: `https://example.test/${sessionId}`, title: `Page ${sessionId}`, text: `page text ${sessionId}` })
     }
+    if (url.pathname === '/api/ego/control/prepare-continue' && continuationBusy)
+      return json({ ok: false, code: 'continuation-agent-busy' }, 409)
     if (url.pathname === '/api/ego/watch/status') return json({ ok: true, sessionId, hostGeneration: state.generation, frameRelay: true, remoteStreamFull: remoteStreamsFull })
     if (url.pathname === '/api/ego/spaces') {
       // The answer is stamped with the host generation observed at REQUEST
@@ -213,6 +216,7 @@ function harness() {
     refuseInputOnce: (code: string, status = 409) => { inputRefusal = { code, status } },
     breakInputNetworkOnce: () => { inputNetworkFailures++ },
     fillRemoteStreams: (on = true) => { remoteStreamsFull = on },
+    refuseBusyContinuation: () => { continuationBusy = true },
     deferKeyDown(sessionId: string) { inputGate = { sessionId, gate: deferred<Response>() } },
     // Native draft editing: set the field value through the prototype's native
     // setter (React's instance value tracker would otherwise dedupe the change
@@ -337,6 +341,22 @@ afterEach(async () => {
 })
 
 describe('mounted rc.2 Sidebar lifecycle', () => {
+  it('explains a busy continuation while retaining human control and sending no prompt or automatic retry', async () => {
+    const f = fixture = harness()
+    await f.render()
+    const own = f.requests.find(request => request.path === '/api/ego/control/status')!.clientKey!
+    Object.assign(f.states.get('a')!, { state: 'human', epoch: 4, holder: own })
+    await f.advance(2500)
+    f.refuseBusyContinuation()
+    await f.click('完成并提交继续')
+    expect(f.container.querySelector('[role="status"]')?.textContent).toContain('主对话仍在运行')
+    expect(f.container.querySelector('[role="status"]')?.textContent).toContain('先重新接管')
+    expect(f.states.get('a')!.state).toBe('human')
+    expect(f.faces.get('a')!.prompt).not.toHaveBeenCalled()
+    await f.advance(10_000)
+    expect(f.requests.filter(request => request.path.endsWith('/prepare-continue'))).toHaveLength(1)
+    expect(f.requests.filter(request => request.path.endsWith('/commit-continue'))).toHaveLength(0)
+  })
   it.each(['hidden', 'unmounted'] as const)('releases a late human grant after the original view is %s', async close => {
     const f = fixture = harness()
     f.deferGrant('a', 7)

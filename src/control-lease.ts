@@ -1,4 +1,5 @@
 import { ScopeError } from './session-spaces.ts'
+import { PreDispatchError } from './action-outcome.ts'
 
 export type ControlState = 'idle' | 'agent' | 'requesting-human' | 'recovering' | 'human' | 'paused' | 'armed'
 /** Global browser lease: all plugin tools, UI operations and human input share it. */
@@ -71,7 +72,7 @@ export class ControlLease {
     this.inFlight = flight
     try { return await flight }
     catch (error) {
-      if (this.epoch === epoch) { this.state = 'paused'; this.unsafePause = true; this.epoch++ }
+      if (this.epoch === epoch && !(error instanceof PreDispatchError)) { this.state = 'paused'; this.unsafePause = true; this.epoch++ }
       throw error
     }
     finally {

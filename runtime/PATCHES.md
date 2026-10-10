@@ -28,6 +28,8 @@
 | （其余 runtime 文件）| 与 vendoring 时一致 | 无后续本地改动 |
 
 ## 说明
+- 2026-10-10 控制可靠性补丁：`ego-browser/dist/out/index.js` 仅在 click/hover 的目标解析、fill 的定位/句柄解析阶段把真正的 `ElementResolutionError` 对象记入 WeakSet；开始输入前即撤销本进程后续认证资格。`ego-linux/bin/ego-browser.mjs` 仅在 scoped 模式为 Host 本次请求输出阶段回执，Host 只接受自带 runner、受限工具、同次 requestId、正常错误退出；不按错误文案猜安全性，不自动重试。
+- 2026-10-10 身份持久化补丁：`browser-state.mjs` 在专用 Profile 的 `.dsh-browser-owner.json` 原子写入版本化身份，再更新临时 `browser.json`；scoped 模式以独立记录为准。复用旧版浏览器需先通过原有归属与端点检查再补记录，停止时保留全部原有校验。损坏独立记录不回退旧 PID；仅在证明旧进程和端点均消失后清理两份记录。
 - `chrome.mjs` 里的代理支持（`EGO_LINUX_PROXY`）在首次 vendoring 时已包含（本 Linux 移植特性），
   非后续本地改动；如需调整走它。
 - **同步提醒**：`lib/index.js` 与 `bin/ego-cast-worker.mjs` 各有一份 humanCheck 探针（逻辑相似）——

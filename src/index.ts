@@ -36,6 +36,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { importLoginCookies } from './login-import.ts'
@@ -50,6 +51,7 @@ import { getSharedFfmpegInstallationManager } from './ffmpeg-installation.ts'
 import { SENTINEL, j, str, num, bool, readAll, SAFE_FN } from './util.ts'
 import { SessionSpaceRegistry, ScopeError } from './session-spaces.ts'
 import { ControlLease } from './control-lease.ts'
+import { PreDispatchError, PREFLIGHT_TOOLS, verifiedPreDispatchFailure } from './action-outcome.ts'
 import { ContinuationGate } from './continuation-gate.ts'
 const DISABLED_EGO_TOOLS = new Set(['ego_cli', 'ego_script', 'ego_js', 'ego_cdp', 'ego_login_import', 'ego_auth_flush', 'ego_status', 'ego_space_close'])
 export const SCOPED_EGO_TOOL_NAMES = ['ego_space_open', 'ego_snapshot', 'ego_navigate', 'ego_click', 'ego_fill', 'ego_screenshot', 'ego_page_info', 'ego_wait', 'ego_wait_for_selector', 'ego_wait_for_url', 'ego_wait_for_response', 'ego_key', 'ego_hover', 'ego_read_element', 'ego_select', 'ego_drag', 'ego_scroll', 'ego_upload', 'ego_download', 'ego_check', 'ego_dialog', 'ego_http', 'ego_captcha', 'ego_help', 'ego_doctor'] as const
@@ -405,6 +407,7 @@ function isColdStartError(message: string): boolean {
 }
 interface WarmupResult {
   ok: boolean
+  preDispatch?: boolean
   error?: string
   value?: unknown
   stdout: string
@@ -488,10 +491,11 @@ export async function runWithStaleSpaceRetry(  ctx: EgoContext,
   exec: ExecLike,
   buildScript: () => string,
   graceOverrideMs?: number,
+  toolName?: string,
 ): Promise<WarmupResult> {
   // A failed CDP/CLI receipt cannot prove a mutating action was not applied.
   // Scoped execution never retries that intent implicitly.
-  if (cfg.scopes) return runEgoScript(ctx.subprocess, buildScript(), exec, cfg, graceOverrideMs)
+  if (cfg.scopes) return runEgoScript(ctx.subprocess, buildScript(), exec, cfg, graceOverrideMs, toolName)
   let result = await withWarmupRetry(() => runEgoScript(ctx.subprocess, buildScript(), exec, cfg, graceOverrideMs))
   if (!result.ok && /task space not found: \d+/.test(result.error ?? '')) {
     cfg.spaceTracker.resetToName()
@@ -550,8 +554,10 @@ interface ExecLike {
   agent?: unknown
 }
 
-async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number): Promise<WarmupResult> {
+async function runEgoScript(subprocess: SubprocessService, script: string, exec: ExecLike, cfg: EgoRuntimeConfig, graceOverrideMs?: number, toolName?: string): Promise<WarmupResult> {
   const binding = cfg.scopes?.fromTool(exec as ToolExec)
+  const requestId = binding && toolName && PREFLIGHT_TOOLS.has(toolName)
+    && cfg.egoBin === fileURLToPath(new URL('../runtime/ego-linux/bin/ego-browser.mjs', import.meta.url)) ? randomUUID() : undefined
   if (binding) {
     if (!cfg.runtimeEnv) throw new ScopeError('isolated-runtime-unconfigured')
     if (exec.signal?.aborted) throw new ScopeError('operation-aborted')
@@ -569,7 +575,7 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
       // Run through the node interpreter so the vendored CLI needs no +x bit.
       argv: [process.execPath, cfg.egoBin, 'nodejs', ...extraCliArgs],
       cwd: process.cwd(),
-      env: resolveEgoEnv(cfg),
+      env: { ...resolveEgoEnv(cfg), DSH_EGO_ACTION_RECEIPT: requestId ?? '' },
       stdio: {
         stdin: { data: script },
         stdout: {
@@ -619,6 +625,7 @@ async function runEgoScript(subprocess: SubprocessService, script: string, exec:
     const missingModule = /Cannot find module|MODULE_NOT_FOUND/i.test(stderr)
     return {
       ok: false,
+      preDispatch: outcome.exitCode === 1 && !outcome.signal && requestId !== undefined && verifiedPreDispatchFailure(stderr, requestId),
       error: missingModule
         ? describeSpawnFailure(new Error(`node could not load ${cfg.egoBin}`))
         : `ego-browser exited with ${
@@ -724,8 +731,15 @@ function defineEgoTool(ctx: EgoContext, cfg: EgoRuntimeConfig, opts: EgoToolOpti
         // handled inside runWithStaleSpaceRetry; the cold-start retry is one
         // level deeper.
         const scoped = cfg.scopes ? cfg.scopes.arguments(cfg.scopes.fromTool(exec), args, opts.name) : args
-        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => opts.buildScript(scoped))
-        if (!result.ok) throw new Error(result.error)
+        let script: string
+        try { script = opts.buildScript(scoped) }
+        catch (error) {
+          // Script construction has not spawned a browser operation.
+          if (cfg.scopes) throw new PreDispatchError(error instanceof Error ? error.message : String(error))
+          throw error
+        }
+        const result = await runWithStaleSpaceRetry(ctx, cfg, exec, () => script, undefined, opts.name)
+        if (!result.ok) throw result.preDispatch ? new PreDispatchError(result.error ?? 'input-preflight-failed') : new Error(result.error)
         if (typeof opts.afterExecute === 'function') opts.afterExecute(args, result.value)
         // Value is JSON.parse output of our own payload — fits the tool JSON contract.
         return result.value
