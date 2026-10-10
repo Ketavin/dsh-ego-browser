@@ -269,6 +269,7 @@ async function pruneSpaces() {
   return 0;
 }
 
+let isPreDispatchFailure = () => false;
 async function main() {
   const argv = process.argv.slice(2);
 
@@ -383,7 +384,9 @@ async function main() {
   const shim = await createEgoShim({ headless });
   globalThis.ego = shim.ego;
 
-  const { runMain } = await import(harness);
+  const sdk = await import(harness);
+  const { runMain } = sdk;
+  isPreDispatchFailure = sdk.isPreDispatchFailure ?? (() => false);
   try {
     return await runMain({ argv: rest });
   } finally {
@@ -405,6 +408,10 @@ main()
     guard.unref();
   })
   .catch((error) => {
+    const requestId = process.env.DSH_EGO_ACTION_RECEIPT;
+    if (process.env.DSH_EGO_SCOPED_WORKER === '1' && /^[0-9a-f-]{36}$/.test(requestId ?? '') && isPreDispatchFailure(error)) {
+      process.stderr.write('\n@@DSH_ACTION_FAILURE@@' + JSON.stringify({ version: 1, requestId, phase: 'input-not-dispatched' }) + '\n');
+    }
     process.stderr.write(`${error?.stack || error}\n`);
     process.exitCode = 1;
     const guard = setTimeout(() => process.exit(1), 3000);

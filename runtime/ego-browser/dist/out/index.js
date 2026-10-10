@@ -1573,6 +1573,21 @@ class ElementResolutionError extends Error {
         this.kind = kind;
     }
 }
+// Local DSH patch: certify resolution failures only before any input action.
+// Keep the proof on the actual Error object; names and stderr text are not proof.
+const preDispatchFailures = new WeakSet();
+let inputActionStarted = false;
+async function inputPreflight(operation) {
+    try { return await operation(); }
+    catch (error) {
+        if (!inputActionStarted && error instanceof ElementResolutionError)
+            preDispatchFailures.add(error);
+        throw error;
+    }
+}
+export function isPreDispatchFailure(error) {
+    return error instanceof Error && preDispatchFailures.has(error) && !inputActionStarted;
+}
 /**
  * Return the ordered AX backend-node match set for a root role locator.
  * Non-role selectors return null so callers can use their normal DOM path.
@@ -2332,8 +2347,8 @@ async function releaseHandle(objectId, sessionId) {
  * @param {(handle: {objectId: string, sessionId?: string}) => Promise<any>} fn Callback bound to the resolved handle.
  * @returns {Promise<any>} Whatever fn returns.
  */
-async function withHandle(selectorOrRef, fn) {
-    const handle = await resolveHandle(selectorOrRef);
+async function withHandle(selectorOrRef, fn, beforeInput = false) {
+    const handle = await (beforeInput ? inputPreflight(() => resolveHandle(selectorOrRef)) : resolveHandle(selectorOrRef));
     try {
         return await fn(handle);
     }
@@ -2860,7 +2875,8 @@ let currentMousePoint = { x: 0, y: 0, sessionId: undefined };
  * @returns {Promise<void>}
  */
 async function click(target, options = {}) {
-    const point = await resolveMouseTarget(target, options.timeout);
+    const point = await inputPreflight(() => resolveMouseTarget(target, options.timeout));
+    inputActionStarted = true;
     rememberMousePoint(point);
     const button = options.button || "left";
     const buttons = pressedButtons(button);
@@ -2911,7 +2927,8 @@ async function dblclick(target, options = {}) {
  * @returns {Promise<void>}
  */
 async function hover(target, options = {}) {
-    const point = await resolveMouseTarget(target, options.timeout);
+    const point = await inputPreflight(() => resolveMouseTarget(target, options.timeout));
+    inputActionStarted = true;
     rememberMousePoint(point);
     maybeHighlight(point, options.label);
     const probeId = await installHoverProbe(point);
@@ -3644,10 +3661,12 @@ async function focus(selector) {
 async function fill(selector, value, options = {}) {
     const clearFirst = options.clearFirst ?? true;
     const timeout = options.timeout ?? state.defaultTimeout;
-    if (timeout > 0 && !(await waitForSelector(selector, { timeout }))) {
-        throw new Error(`fill: element not found: ${JSON.stringify(selector)}`);
-    }
+    await inputPreflight(async () => {
+        if (timeout > 0 && !(await waitForSelector(selector, { timeout })))
+            throw new ElementResolutionError(`fill: element not found: ${JSON.stringify(selector)}`, 'transient');
+    });
     await withHandle(selector, async ({ objectId, sessionId }) => {
+        inputActionStarted = true;
         const focusSource = clearFirst
             ? "function(){this.focus(); if(this.isContentEditable){const range=document.createRange();range.selectNodeContents(this);const sel=getSelection();sel.removeAllRanges();sel.addRange(range);}else if(typeof this.select==='function') this.select();}"
             : "function(){this.focus();}";
@@ -3672,7 +3691,7 @@ async function fill(selector, value, options = {}) {
             returnByValue: true,
             awaitPromise: false,
         }, sessionId);
-    });
+    }, true);
 }
 /**
  * Press a sequence of characters, optionally focusing a target first.

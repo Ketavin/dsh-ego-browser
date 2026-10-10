@@ -16,6 +16,7 @@ export const STATE_DIR = IS_WIN
 
 export const PROFILE_DIR = process.env.EGO_LINUX_PROFILE || join(DATA_DIR, "profile");
 export const BROWSER_STATE_FILE = join(STATE_DIR, "browser.json");
+export const BROWSER_OWNER_FILE = join(PROFILE_DIR, '.dsh-browser-owner.json');
 export const SPACES_STATE_FILE = join(STATE_DIR, "spaces-server.json");
 export const TASK_SPACE_FILE = join(STATE_DIR, "task-spaces.json");
 

@@ -3,8 +3,9 @@ import { access, mkdir, readdir, readFile, readlink, writeFile, rm } from "node:
 import { constants } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
-import { BROWSER_STATE_FILE, PROFILE_DIR, STATE_DIR } from "./paths.mjs";
+import { BROWSER_STATE_FILE, BROWSER_OWNER_FILE, PROFILE_DIR } from "./paths.mjs";
 import { scopedBrowserStateOwnership } from './process-identity.mjs';
+import { createBrowserStateStore } from './browser-state.mjs';
 
 const BINARY_CANDIDATES = [
   process.env.EGO_LINUX_CHROME,
@@ -207,18 +208,10 @@ async function probe(port) {
   }
 }
 
-async function readBrowserState() {
-  try {
-    return JSON.parse(await readFile(BROWSER_STATE_FILE, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-async function writeBrowserState(state) {
-  await mkdir(STATE_DIR, { recursive: true });
-  await writeFile(BROWSER_STATE_FILE, JSON.stringify(state, null, 2));
-}
+const browserState = createBrowserStateStore({ stateFile: BROWSER_STATE_FILE, ownerFile: BROWSER_OWNER_FILE,
+  scoped: process.env.DSH_EGO_SCOPED_WORKER === '1' });
+const readBrowserState = () => browserState.read();
+const writeBrowserState = state => browserState.write(state);
 
 /**
  * Poll for a DevTools endpoint that answers.
@@ -765,7 +758,11 @@ export async function ensureBrowser({ headless = false } = {}) {
     }
     const wsUrl = await probe(state.port);
     if (process.env.DSH_EGO_SCOPED_WORKER === '1' && wsUrl && wsUrl !== state.wsUrl) throw new Error('runtime-endpoint-ownership-unverified');
-    if (wsUrl) return { port: state.port, wsUrl, launched: false };
+    if (wsUrl) {
+      // Backfill the durable owner for an existing verified legacy browser.
+      if (process.env.DSH_EGO_SCOPED_WORKER === '1') await writeBrowserState(state);
+      return { port: state.port, wsUrl, launched: false };
+    }
   }
   return launch({ headless });
 }
@@ -845,7 +842,7 @@ export async function stopBrowser({ requireState = false } = {}) {
     const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
     if (ownership === 'absent') {
       if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
-      await rm(BROWSER_STATE_FILE, { force: true }); return false;
+      await browserState.forget(); return false;
     }
     if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
     const wsUrl = state.port ? await probe(state.port) : null;
@@ -864,7 +861,7 @@ export async function stopBrowser({ requireState = false } = {}) {
       const ownership = await scopedBrowserStateOwnership(state, PROFILE_DIR);
       if (ownership === 'absent') {
         if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
-        await rm(BROWSER_STATE_FILE, { force: true }); return false;
+        await browserState.forget(); return false;
       }
       if (ownership !== 'owned') throw new Error('runtime-state-ownership-unverified');
     }
@@ -892,7 +889,7 @@ export async function stopBrowser({ requireState = false } = {}) {
     if (state.pid && !(await waitForProcessExit(state.pid, 5000))) throw new Error('runtime-stop-unverified');
     if (state.port && await probe(state.port)) throw new Error('runtime-stop-unverified');
   }
-  await rm(BROWSER_STATE_FILE, { force: true });
+  await browserState.forget();
   // A SIGTERMed Chrome does not always release its profile lock, which would
   // block the next launch. After a graceful close there is nothing left to
   // clear, and this is a no-op.

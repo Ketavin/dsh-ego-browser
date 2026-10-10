@@ -17,7 +17,7 @@ function mount() {
   const routes = new Map<string, (req: unknown, res: unknown) => unknown>()
   const events = new Map<string, (...args: unknown[]) => unknown>()
   const spawns: SpawnSpec[] = []
-  let failNext = false
+  let failNext: false | 'unknown' | 'preflight' | 'stale' = false
   const targetNames = (name: string) => ['a-' + name.slice(-12), 'b-' + name.slice(-12)]
   const ctx = {
     tools: { register: (tool: { name: string; execute(args: object, exec: ToolExec): Promise<unknown> }) => { tools.set(tool.name, tool); return () => {} } },
@@ -31,8 +31,12 @@ function mount() {
     subprocess: { spawn: (spec: SpawnSpec) => {
       spawns.push(spec)
       if (failNext) {
+        const failure = failNext
         failNext = false
-        return { done: Promise.resolve({ exitCode: 1, signal: null }), collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }, stderr: { readFrom: () => ({ text: 'target closed after dispatch', nextOffset: 28, lossy: false }) } } }
+        const stderr = failure === 'unknown' ? 'target closed after dispatch' :
+          '@@DSH_ACTION_FAILURE@@' + JSON.stringify({ version: 1, requestId: failure === 'stale' ? 'old-call' : spec.env!.DSH_EGO_ACTION_RECEIPT,
+            phase: 'input-not-dispatched' }) + '\nElementResolutionError: Locator matched 2 elements'
+        return { done: Promise.resolve({ exitCode: 1, signal: null }), collected: { stdout: { readFrom: () => ({ text: '', nextOffset: 0, lossy: false }) }, stderr: { readFrom: () => ({ text: stderr, nextOffset: stderr.length, lossy: false }) } } }
       }
       const name = JSON.parse(spec.stdio.stdin.data.match(/taskSpaces\.useOrCreate\(("[^"]*")\)/)![1]!) as string
       const targets = targetNames(name)
@@ -53,7 +57,8 @@ function mount() {
     await routes.get(path)!(req, res)
     return { status, data: JSON.parse(data) }
   }
-  return { home, live, tools, exec, spawns, events, invoke, targetNames, loseNextReceipt: () => { failNext = true } }
+  return { home, live, tools, exec, spawns, events, invoke, targetNames, loseNextReceipt: () => { failNext = 'unknown' },
+    failPreflight: (stale = false) => { failNext = stale ? 'stale' : 'preflight' } }
 }
 
 describe('registered tools through actual rc.2 defineTool execution', () => {
@@ -78,6 +83,30 @@ describe('registered tools through actual rc.2 defineTool execution', () => {
     await expect(h.tools.get('ego_navigate')!.execute({ url: 'https://fixture.example' }, h.exec('A'))).rejects.toThrow('target closed after dispatch')
     expect(h.spawns).toHaveLength(1)
     await expect(h.tools.get('ego_page_info')!.execute({}, h.exec('A'))).rejects.toThrow('agent-control-blocked')
+    expect(h.spawns).toHaveLength(1)
+  })
+  it('allows a corrected next tool after a certified selector failure without retrying the failed click', async () => {
+    const h = mount(); h.failPreflight()
+    await expect(h.tools.get('ego_click')!.execute({ selector: 'loc=role:button[name="取消"]' }, h.exec('A'))).rejects.toThrow('matched 2 elements')
+    expect(h.spawns).toHaveLength(1)
+    expect(h.spawns[0]!.env!.DSH_EGO_ACTION_RECEIPT).toBeTruthy()
+    await h.tools.get('ego_page_info')!.execute({}, h.exec('A'))
+    expect(h.spawns).toHaveLength(2)
+  })
+  it('refuses a stale receipt and never requests input preflight proof for a navigation', async () => {
+    const stale = mount(); stale.failPreflight(true)
+    await expect(stale.tools.get('ego_click')!.execute({ selector: 'button' }, stale.exec('A'))).rejects.toThrow('matched 2 elements')
+    await expect(stale.tools.get('ego_page_info')!.execute({}, stale.exec('A'))).rejects.toThrow('agent-control-blocked')
+    const navigation = mount(); navigation.failPreflight()
+    await expect(navigation.tools.get('ego_navigate')!.execute({ url: 'https://fixture.example' }, navigation.exec('A'))).rejects.toThrow()
+    expect(navigation.spawns[0]!.env!.DSH_EGO_ACTION_RECEIPT).toBe('')
+    await expect(navigation.tools.get('ego_page_info')!.execute({}, navigation.exec('A'))).rejects.toThrow('agent-control-blocked')
+  })
+  it('reports invalid action arguments without poisoning the lease or launching a CLI', async () => {
+    const h = mount()
+    await expect(h.tools.get('ego_click')!.execute({}, h.exec('A'))).rejects.toThrow('provide either')
+    expect(h.spawns).toHaveLength(0)
+    await h.tools.get('ego_page_info')!.execute({}, h.exec('A'))
     expect(h.spawns).toHaveLength(1)
   })
   it('reports only the actual scoped capability set in help and resets counts on real activity events', async () => {

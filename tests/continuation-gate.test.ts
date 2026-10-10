@@ -83,6 +83,22 @@ describe('continuation admission at the public rc.2 maintenance seam (fixtures)'
     await expect(h.gate.prepare('A', h.human.leaseEpoch)).rejects.toThrow('continuation-agent-busy')
     expect(h.control.status('A').state).toBe('human')
   })
+  it('allows an explicit retry after a busy main turn settles, without prematurely releasing human control', async () => {
+    const h = await harness()
+    let settle!: () => void
+    const idle = new Promise<void>(resolve => { settle = resolve })
+    h.fixture.agent.whenIdle = () => idle
+    const refused = expect(h.gate.prepare('A', h.human.leaseEpoch)).rejects.toThrow('continuation-agent-busy')
+    await refused
+    expect(h.control.status('A')).toMatchObject({ state: 'human', recoveryRequired: false })
+    expect(h.fixture.nextTurn).toHaveLength(0)
+    settle()
+    const receipt = await h.gate.prepare('A', h.human.leaseEpoch)
+    h.fixture.nextTurn.push(message('explicit-retry', receipt.marker))
+    expect(h.gate.commit('A', receipt.continuationId, receipt.leaseEpoch).admitted).toBe(true)
+    expect(h.control.status('A').state).toBe('armed')
+    h.gate.dispose()
+  })
   it('settles maintenance on cancel and timeout while retaining newly admitted messages', async () => {
     const h = await harness(), receipt = await h.gate.prepare('A', h.human.leaseEpoch)
     h.fixture.nextTurn.push(message('new', receipt.marker)); h.fixture.cancel.abort()
